@@ -379,8 +379,12 @@ pub struct Table {
 }
 
 impl Table {
-    /// The values of the table in `data` (the buffer's bytes); `None` if it runs past the end.
+    /// The values of the table in `data` (the buffer's bytes); `None` if it runs past the end,
+    /// or has more records than the buffer has bytes (only possible with a stride of 0).
     pub fn values(&self, data: &[u8]) -> Option<Vec<i64>> {
+        if self.count as usize > data.len() {
+            return None;
+        }
         (0..self.count as usize)
             .map(|i| {
                 let start = self.offset as usize + i * self.stride as usize;
@@ -1437,6 +1441,12 @@ mod tests {
         };
         assert_eq!(table.values(&[9, 0, 7, 0, 0, 8, 0]), Some(vec![7, 8]));
         assert_eq!(table.values(&[9, 0, 7, 0, 0]), None);
+        let repeated = Table {
+            stride: 0,
+            count: u32::MAX,
+            ..table
+        };
+        assert_eq!(repeated.values(&[9, 0, 7, 0, 0, 8, 0]), None);
     }
 
     #[test]

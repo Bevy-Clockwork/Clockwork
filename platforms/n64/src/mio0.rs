@@ -8,7 +8,13 @@ pub enum Mio0Error {
     Truncated,
     #[error("MIO0 back-reference points before the output")]
     BadReference,
+    #[error("MIO0 output of {0} bytes is over the {MAX_OUTPUT}-byte limit")]
+    TooLarge(usize),
 }
+
+/// The largest output accepted, twice the N64's expanded RAM: a header claiming more is not
+/// real MIO0 data.
+pub const MAX_OUTPUT: usize = 16 * 1024 * 1024;
 
 /// Decompresses one block, ignoring trailing bytes and allowing overlapping copies.
 pub fn decompress(data: &[u8]) -> Result<Vec<u8>, Mio0Error> {
@@ -25,6 +31,9 @@ pub fn decompress(data: &[u8]) -> Result<Vec<u8>, Mio0Error> {
         ))
     };
     let size = word(4)? as usize;
+    if size > MAX_OUTPUT {
+        return Err(Mio0Error::TooLarge(size));
+    }
     let mut compressed = word(8)? as usize;
     let mut raw = word(12)? as usize;
     let mut layout = 16;
@@ -70,6 +79,15 @@ mod tests {
         v.extend(refs);
         v.extend(raw);
         v
+    }
+
+    #[test]
+    fn refuses_impossible_sizes() {
+        let data = block(u32::MAX, 0, &[], &[]);
+        assert_eq!(
+            decompress(&data),
+            Err(Mio0Error::TooLarge(u32::MAX as usize))
+        );
     }
     #[test]
     fn overlap_and_output_limit() {

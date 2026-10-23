@@ -85,8 +85,21 @@ fn read_rom_matching(path: &Path, accepts: impl Fn(&[u8]) -> bool) -> Result<Vec
                     .any(|ext| *ext != "cue" && name.ends_with(&format!(".{ext}")))
             });
         if is_rom {
+            // Never inflate past the size the archive declares: a member that claims a few
+            // bytes but expands to gigabytes (a zip bomb) is cut off and rejected.
+            let declared = member.size();
             let mut rom = Vec::new();
-            std::io::Read::read_to_end(&mut member, &mut rom).map_err(io_error)?;
+            std::io::Read::read_to_end(
+                &mut std::io::Read::take(&mut member, declared.saturating_add(1)),
+                &mut rom,
+            )
+            .map_err(io_error)?;
+            if rom.len() as u64 > declared {
+                return Err(ImportError::Zip {
+                    path: path.to_path_buf(),
+                    message: format!("a member expands past its declared {declared} bytes"),
+                });
+            }
             if accepts(&rom) {
                 return Ok(rom);
             }
