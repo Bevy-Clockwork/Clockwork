@@ -927,6 +927,11 @@ fn recipe_view(ui: &mut egui::Ui, state: &mut EditorState, plugin: &Plugin) {
                 graph.nav.toolbar(ui, &name);
                 ui.add_space(8.0);
                 ui.label(kit::hint(format!("{steps} steps · {outputs} outputs")));
+                if graph.running() {
+                    ui.add_space(8.0);
+                    ui.label(kit::hint("Running…"))
+                        .on_hover_text("Nodes show the last run until this one is done");
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     key_hints(
                         ui,

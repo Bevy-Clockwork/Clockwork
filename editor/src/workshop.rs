@@ -1,7 +1,10 @@
 //! The Workshop's 3D side: shows the scene's nodes in the viewport, places dropped items, picks
 //! surface cells under the cursor, and moves the viewport camera.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use bevy::{
     asset::RenderAssetUsages,
@@ -13,7 +16,7 @@ use bevy::{
     window::PrimaryWindow,
 };
 use clockwork_core::{NativeScale, image::RgbaImage, recipe::Kind, surface::SurfaceMap};
-use clockwork_recipe::Extracted;
+use clockwork_recipe::{Extracted, Plugin};
 
 use crate::{
     ViewportCamera, models,
@@ -65,7 +68,9 @@ pub struct Extractions {
     plugins_revision: u64,
     /// Bumped whenever results are thrown away or a new one arrives.
     revision: u64,
-    by_plugin: HashMap<String, Result<Extracted, String>>,
+    by_plugin: HashMap<String, Result<Arc<Extracted>, String>>,
+    /// The plugins as they were when their results were kept, to tell which changed.
+    seen: HashMap<String, Plugin>,
     /// Recipes still running.
     pending: HashMap<String, Task<Result<Extracted, String>>>,
     /// ROMs in canonical form, by SHA-1, read on first use. Kept when plugins change.
@@ -86,7 +91,15 @@ impl Extractions {
     }
 
     pub fn get(&self, plugin: &str) -> Option<&Extracted> {
-        self.by_plugin.get(plugin).and_then(|r| r.as_ref().ok())
+        self.by_plugin
+            .get(plugin)
+            .and_then(|r| r.as_ref().ok())
+            .map(|x| x.as_ref())
+    }
+
+    /// The result, to hand to work in the background.
+    pub fn shared(&self, plugin: &str) -> Option<Arc<Extracted>> {
+        self.by_plugin.get(plugin)?.as_ref().ok().cloned()
     }
 
     /// Why a plugin couldn't be extracted, if it couldn't.
@@ -107,12 +120,42 @@ impl Extractions {
         !self.pending.is_empty()
     }
 
-    /// Throws every result away (plugins changed on disk); running recipes are cancelled.
-    fn reset(&mut self, plugins_revision: u64) {
+    /// Plugins changed on disk: drops the results (and cancels the recipes) of plugins that
+    /// changed or are gone, of every plugin that uses one of them, and failures, which may work
+    /// now. The others are kept, so one edited recipe doesn't extract everything again.
+    fn invalidate(&mut self, plugins_revision: u64, plugins: &[Plugin]) {
         self.plugins_revision = plugins_revision;
         self.revision += 1;
-        self.by_plugin.clear();
-        self.pending.clear();
+        let mut stale: HashSet<String> = self
+            .seen
+            .iter()
+            .filter(|(name, old)| {
+                plugins
+                    .iter()
+                    .find(|p| p.name() == name.as_str())
+                    .is_none_or(|p| !same_plugin(p, old))
+            })
+            .map(|(name, _)| name.clone())
+            .collect();
+        loop {
+            let more: Vec<String> = plugins
+                .iter()
+                .filter(|p| !stale.contains(p.name()))
+                .filter(|p| uses_plugins(p).iter().any(|d| stale.contains(d)))
+                .map(|p| p.name().to_string())
+                .collect();
+            if more.is_empty() {
+                break;
+            }
+            stale.extend(more);
+        }
+        self.by_plugin
+            .retain(|name, result| result.is_ok() && !stale.contains(name));
+        self.pending.retain(|name, _| !stale.contains(name));
+        self.seen = plugins
+            .iter()
+            .map(|p| (p.name().to_string(), p.clone()))
+            .collect();
     }
 
     /// Starts the plugin's recipe if it hasn't run yet; [`Extractions::get`] has the result once
@@ -206,16 +249,42 @@ impl Extractions {
             ),
             Err(e) => state.log(LogLevel::Error, format!("{plugin}: {e}")),
         }
-        self.by_plugin.insert(plugin.to_string(), result);
+        self.by_plugin
+            .insert(plugin.to_string(), result.map(Arc::new));
         self.revision += 1;
     }
+}
+
+/// Whether a plugin reloaded from disk is the same as before.
+fn same_plugin(a: &Plugin, b: &Plugin) -> bool {
+    a.dir == b.dir && a.manifest == b.manifest && a.recipe == b.recipe && a.compose == b.compose
+}
+
+/// The other plugins whose outputs a plugin's result is made from: those a composition puts
+/// together, and those whose assets a recipe's outputs name (a character's movement, say).
+fn uses_plugins(plugin: &Plugin) -> Vec<String> {
+    let mut names: Vec<String> = match &plugin.compose {
+        Some(composition) => clockwork_recipe::compose::dependencies(composition),
+        None => plugin
+            .recipe
+            .outputs
+            .iter()
+            .flat_map(|o| (clockwork_core::asset::kind(o).uses)(plugin.name(), o))
+            .map(|u| u.asset.plugin)
+            .collect(),
+    };
+    names.retain(|n| n != plugin.name() && n != clockwork_core::asset::BUILTIN);
+    names.sort();
+    names.dedup();
+    names
 }
 
 /// Throws results away when plugins changed on disk, and collects recipes that finished in the
 /// background.
 pub fn extraction_system(mut state: ResMut<EditorState>, mut extractions: ResMut<Extractions>) {
     if state.workshop.plugins_revision != extractions.plugins_revision {
-        extractions.reset(state.workshop.plugins_revision);
+        let plugins = state.workshop.plugins.clone();
+        extractions.invalidate(state.workshop.plugins_revision, &plugins);
     }
     let done: Vec<(String, Result<Extracted, String>)> = extractions
         .pending
@@ -900,4 +969,66 @@ pub fn camera_system(
     let rotation = Quat::from_euler(EulerRot::YXZ, orbit.yaw, -orbit.pitch, 0.0);
     let position = orbit.focus + rotation * Vec3::Z * orbit.distance;
     **camera = Transform::from_translation(position).looking_at(orbit.focus, Vec3::Y);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn plugin(name: &str, outputs: &str) -> Plugin {
+        Plugin {
+            dir: Default::default(),
+            manifest: clockwork_core::PluginManifest::from_toml(&format!(
+                "[plugin]\nname = \"{name}\"\nversion = \"0.1.0\"\ncore = \"0.1\"\n[source]\ngame = \"g\"\nsha1 = []\n"
+            ))
+            .unwrap(),
+            recipe: ron::from_str(&format!("(steps: [], outputs: [{outputs}])")).unwrap(),
+            compose: None,
+        }
+    }
+
+    const FLOW: &str =
+        r#"Flow(id: "flow", flow: (files: Some((title: (pages: ["FILES"]), slots: 2))))"#;
+
+    #[test]
+    fn only_changed_plugins_and_those_using_them_are_extracted_again() {
+        let uses_b = r#"Flow(id: "alias", flow: "b/flow")"#;
+        let mut plugins = vec![plugin("a", uses_b), plugin("b", FLOW), plugin("c", FLOW)];
+        assert_eq!(uses_plugins(&plugins[0]), ["b"]);
+        assert!(uses_plugins(&plugins[1]).is_empty());
+
+        let mut extractions = Extractions::default();
+        extractions.invalidate(1, &plugins);
+        for name in ["a", "b", "c"] {
+            extractions
+                .by_plugin
+                .insert(name.into(), Ok(Arc::new(Extracted::default())));
+        }
+        extractions
+            .by_plugin
+            .insert("d".into(), Err("its game is not in the Library".into()));
+
+        // Nothing changed: everything that worked is kept, failures are tried again.
+        extractions.invalidate(2, &plugins);
+        assert!(["a", "b", "c"].iter().all(|n| extractions.get(n).is_some()));
+        assert!(extractions.error("d").is_none());
+
+        // b changed: b and a (which uses b) go, c stays.
+        plugins[1] = plugin("b", &FLOW.replace("slots: 2", "slots: 3"));
+        let before = extractions.revision();
+        extractions.invalidate(3, &plugins);
+        assert!(extractions.revision() > before);
+        assert!(extractions.get("a").is_none());
+        assert!(extractions.get("b").is_none());
+        assert!(extractions.get("c").is_some());
+
+        // A plugin that is gone goes too.
+        extractions
+            .by_plugin
+            .insert("b".into(), Ok(Arc::new(Extracted::default())));
+        plugins.remove(1);
+        extractions.invalidate(4, &plugins);
+        assert!(extractions.get("b").is_none());
+        assert!(extractions.get("c").is_some());
+    }
 }
