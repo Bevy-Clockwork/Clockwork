@@ -307,6 +307,7 @@ mod tests {
         EditorState {
             library: clockwork_library::Library::new(),
             missing_roms: Vec::new(),
+            known_roms: Vec::new(),
             selected: None,
             search: String::new(),
             agent_prompt: String::new(),

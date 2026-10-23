@@ -34,7 +34,7 @@ impl Workspace {
         let mut library = Library::new().with_platforms(clockwork_platforms::all());
         let mut problems = Vec::new();
         for path in &stored.roms {
-            if let Err(e) = library.import(path) {
+            if let Err(e) = library.import_known(path, &stored.known) {
                 problems.push(e.to_string());
             }
         }

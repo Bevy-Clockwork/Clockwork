@@ -36,6 +36,8 @@ pub struct EditorState {
     /// Remembered ROMs that couldn't be read this run (a drive not plugged in, a moved file).
     /// They stay in the saved Library, so they come back once they can be read again.
     pub missing_roms: Vec<PathBuf>,
+    /// What the saved Library remembered about each ROM file, kept for the missing ones.
+    pub known_roms: Vec<clockwork_library::KnownRom>,
     pub selected: Option<usize>,
     pub search: String,
     pub agent_prompt: String,
@@ -360,6 +362,7 @@ impl EditorState {
         let mut state = Self {
             library: Library::new().with_platforms(clockwork_platforms::all()),
             missing_roms: Vec::new(),
+            known_roms: Vec::new(),
             selected: None,
             search: String::new(),
             agent_prompt: String::new(),
@@ -394,13 +397,18 @@ impl EditorState {
             );
         }
         for path in stored.roms {
-            if let Err(e) = state.library.import(&path) {
+            if let Err(e) = state.library.import_known(&path, &stored.known) {
                 state.log(
                     LogLevel::Warn,
                     format!("Could not reload ROM (it stays in the Library): {e}"),
                 );
                 state.missing_roms.push(path);
             }
+        }
+        state.known_roms = stored.known;
+        // Remember what was just read, so the next start can skip it.
+        if state.known_to_save() != state.known_roms {
+            state.save();
         }
         state.log(
             LogLevel::Info,
@@ -539,12 +547,31 @@ impl EditorState {
         remembered_roms(self.library.entries(), &self.missing_roms)
     }
 
+    /// What to remember about each ROM file: fresh for the Library's entries, as last saved for
+    /// the missing ones.
+    fn known_to_save(&self) -> Vec<clockwork_library::KnownRom> {
+        let mut known: Vec<_> = self
+            .library
+            .entries()
+            .iter()
+            .filter_map(|e| self.library.known(e))
+            .collect();
+        known.extend(
+            self.known_roms
+                .iter()
+                .filter(|k| self.missing_roms.contains(&k.path))
+                .cloned(),
+        );
+        known
+    }
+
     pub fn save(&mut self) {
         let stored = store::Stored {
             roms: self.remembered_roms(),
             fetch_box_art: self.fetch_box_art,
             names: self.names.clone(),
             decomps: self.decomps.clone(),
+            known: self.known_to_save(),
         };
         if let Err(e) = store::save(&stored) {
             self.log(LogLevel::Error, format!("Could not save the Library: {e}"));

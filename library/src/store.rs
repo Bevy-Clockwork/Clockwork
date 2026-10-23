@@ -1,8 +1,10 @@
 //! The Library's saved state (`library.ron` in Clockwork's data folder), shared by the editor
 //! and the agent's MCP server.
 //!
-//! Only ROM paths are stored. ROMs are re-read and re-hashed on load, so the stored file never
-//! contains game data and can't go stale.
+//! ROM paths are stored with what was learned from each file (its hash and header title, see
+//! [`crate::KnownRom`]), so unchanged files aren't re-read on every start. A file whose
+//! length or modification time changed is read and hashed again. The stored file never
+//! contains game data.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -23,6 +25,9 @@ pub struct Stored {
     /// Decompilation repositories linked to games, by SHA-1.
     #[serde(default)]
     pub decomps: BTreeMap<String, String>,
+    /// What was learned from each ROM file last time, to skip re-reading unchanged ones.
+    #[serde(default)]
+    pub known: Vec<crate::KnownRom>,
 }
 
 fn yes() -> bool {
@@ -36,6 +41,7 @@ impl Default for Stored {
             fetch_box_art: true,
             names: BTreeMap::new(),
             decomps: BTreeMap::new(),
+            known: Vec::new(),
         }
     }
 }
