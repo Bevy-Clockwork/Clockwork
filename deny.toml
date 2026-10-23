@@ -8,6 +8,12 @@ all-features = false
 # Unmaintained crates are reported but don't fail CI; vulnerabilities do.
 unmaintained = "none"
 yanked = "deny"
+ignore = [
+    # ruzstd < 0.9.1 can be made to allocate gigabytes by a crafted .zst stream. It comes only
+    # from bevy_image (zstd-compressed KTX2 textures), which pins ^0.8; Clockwork doesn't load
+    # KTX2 files from untrusted sources. Drop this once Bevy moves to ruzstd >= 0.9.1.
+    { id = "RUSTSEC-2026-0344", reason = "only via bevy_image, which pins ruzstd ^0.8" },
+]
 
 [licenses]
 allow = [
