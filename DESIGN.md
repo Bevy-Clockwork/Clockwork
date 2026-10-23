@@ -728,6 +728,8 @@ With `CLOCKWORK_CONTROL=<folder>`, the editor runs command files dropped into th
 (`*.ron`, a list such as `[Screen(Workshop), Frame("Mario"), Animation("Mario", "walk"),
 Wait(30), Screenshot("walk.png"), Quit]`) and writes `<file>.done` when done. Screenshots come
 from the renderer, so tests never move the user's mouse or need the window in front.
+A file is read as soon as it appears, so scripts write it under another name (`cmd.tmp`) and
+rename it to `cmd.ron` when complete.
 
 ---
 
