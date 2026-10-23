@@ -674,6 +674,8 @@ pub fn scene_system(
     } else if settings.autosave_scene && state.workshop.scene.dirty && now - *last_save > 1.0 {
         *last_save = now;
         if let Err(e) = state.workshop.scene.save() {
+            // It stays dirty: try again in ten seconds rather than every frame.
+            *last_save = now + 9.0;
             state.log(LogLevel::Warn, format!("Could not save the scene: {e}"));
         }
     }

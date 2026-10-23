@@ -12,13 +12,21 @@ pub fn read(path: &Path) -> Result<Vec<u8>, ImportError> {
     let text = std::fs::read_to_string(path).map_err(|e| fail(e.to_string()))?;
     let (name, offset) = data_file(&text).map_err(fail)?;
     let file = path.parent().unwrap_or(Path::new(".")).join(name);
-    let mut bytes =
-        std::fs::read(&file).map_err(|source| ImportError::Io { path: file, source })?;
-    if offset >= bytes.len() {
+    let io = |source| ImportError::Io {
+        path: file.clone(),
+        source,
+    };
+    let mut data = std::fs::File::open(&file).map_err(io)?;
+    let len = data.metadata().map_err(io)?.len();
+    if offset as u64 >= len {
         return Err(fail("data track starts beyond the end of its file".into()));
     }
+    // Read from the track's start rather than reading everything and shifting it down.
     // Keep raw sectors (including XA data) intact; recipes use offsets into these bytes.
-    bytes.drain(..offset);
+    use std::io::{Read, Seek, SeekFrom};
+    data.seek(SeekFrom::Start(offset as u64)).map_err(io)?;
+    let mut bytes = Vec::with_capacity((len - offset as u64) as usize);
+    data.read_to_end(&mut bytes).map_err(io)?;
     Ok(bytes)
 }
 

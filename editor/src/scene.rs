@@ -589,11 +589,25 @@ impl Scene {
         store::data_dir().map(|d| d.join("scenes").join("untitled.ron"))
     }
 
-    /// The saved scene, or an empty one.
-    pub fn load() -> Self {
-        Self::path()
-            .and_then(|p| Self::load_from(&p))
-            .unwrap_or_default()
+    /// The saved scene (empty if there is none), and why it couldn't be read if it couldn't.
+    /// An unreadable file is set aside, so the next autosave doesn't overwrite it.
+    pub fn load_reporting() -> (Self, Option<String>) {
+        let Some(path) = Self::path() else {
+            return (Self::default(), None);
+        };
+        match clockwork_library::files::load_ron::<Scene>(&path) {
+            Ok(None) => (Self::default(), None),
+            Ok(Some(scene)) if scene.get(ROOT).is_some() => (scene.loaded(), None),
+            Ok(Some(_)) => {
+                let kept = match clockwork_library::files::set_aside(&path) {
+                    Some(kept) => format!("it was kept as {}", kept.display()),
+                    None => "it could not be moved aside".into(),
+                };
+                let problem = format!("{} has no root node; {kept}", path.display());
+                (Self::default(), Some(problem))
+            }
+            Err(problem) => (Self::default(), Some(problem)),
+        }
     }
 
     /// A scene from a file, if it holds a valid one.
@@ -602,21 +616,22 @@ impl Scene {
             .ok()
             .and_then(|text| ron::from_str::<Scene>(&text).ok())
             .filter(|s| s.get(ROOT).is_some())
-            .map(|mut s| {
-                s.generation = 1;
-                s
-            })
+            .map(Self::loaded)
     }
 
+    fn loaded(mut self) -> Self {
+        self.generation = 1;
+        self
+    }
+
+    /// Writes the scene. It stays dirty if that fails, so a later save tries again.
     pub fn save(&mut self) -> Result<(), String> {
-        self.dirty = false;
         let path = Self::path().ok_or("no data directory")?;
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-        }
         let text =
             ron::ser::to_string_pretty(self, Default::default()).map_err(|e| e.to_string())?;
-        std::fs::write(path, text).map_err(|e| e.to_string())
+        clockwork_library::files::write_atomic(&path, text).map_err(|e| e.to_string())?;
+        self.dirty = false;
+        Ok(())
     }
 }
 

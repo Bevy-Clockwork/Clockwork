@@ -528,7 +528,9 @@ pub fn save(
     };
     let toml = toml::to_string(&manifest).map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    std::fs::write(dir.join("clockwork.toml"), toml).map_err(|e| e.to_string())?;
-    std::fs::write(dir.join("recipe.ron"), recipe_text).map_err(|e| e.to_string())?;
+    clockwork_library::files::write_atomic(dir.join("clockwork.toml"), toml)
+        .map_err(|e| e.to_string())?;
+    clockwork_library::files::write_atomic(dir.join("recipe.ron"), recipe_text)
+        .map_err(|e| e.to_string())?;
     Ok(dir)
 }

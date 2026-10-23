@@ -66,21 +66,21 @@ impl Settings {
         store::data_dir().map(|d| d.join("settings.ron"))
     }
 
-    pub fn load() -> Self {
-        Self::path()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .and_then(|text| ron::from_str(&text).ok())
-            .unwrap_or_default()
+    /// The saved settings (defaults if there are none), and why they couldn't be read if they
+    /// couldn't. An unreadable file is set aside rather than overwritten.
+    pub fn load_reporting() -> (Self, Option<String>) {
+        match Self::path().map(|p| clockwork_library::files::load_ron(&p)) {
+            Some(Ok(Some(settings))) => (settings, None),
+            Some(Err(problem)) => (Self::default(), Some(problem)),
+            _ => (Self::default(), None),
+        }
     }
 
     pub fn save(&self) -> Result<(), String> {
         let path = Self::path().ok_or("no data directory")?;
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-        }
         let text =
             ron::ser::to_string_pretty(self, Default::default()).map_err(|e| e.to_string())?;
-        std::fs::write(path, text).map_err(|e| e.to_string())
+        clockwork_library::files::write_atomic(&path, text).map_err(|e| e.to_string())
     }
 }
 

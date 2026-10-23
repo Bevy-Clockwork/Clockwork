@@ -33,6 +33,11 @@ pub enum Screen {
 #[derive(Resource)]
 pub struct EditorState {
     pub library: Library,
+    /// Remembered ROMs that couldn't be read this run (a drive not plugged in, a moved file).
+    /// They stay in the saved Library, so they come back once they can be read again.
+    pub missing_roms: Vec<PathBuf>,
+    /// What the saved Library remembered about each ROM file, kept for the missing ones.
+    pub known_roms: Vec<clockwork_library::KnownRom>,
     pub selected: Option<usize>,
     pub search: String,
     pub agent_prompt: String,
@@ -219,7 +224,7 @@ impl Default for Workshop {
             plugins: Vec::new(),
             selected: None,
             plugins_revision: 0,
-            scene: Scene::load(),
+            scene: Scene::default(),
             selected_node: None,
             selection: Vec::new(),
             clipboard: Vec::new(),
@@ -353,9 +358,11 @@ pub fn plugin_dirs() -> Vec<PathBuf> {
 impl EditorState {
     /// Creates the state and re-imports the ROMs remembered from the last run.
     pub fn load() -> Self {
-        let stored = store::load();
+        let (stored, problem) = store::load_reporting();
         let mut state = Self {
             library: Library::new().with_platforms(clockwork_platforms::all()),
+            missing_roms: Vec::new(),
+            known_roms: Vec::new(),
             selected: None,
             search: String::new(),
             agent_prompt: String::new(),
@@ -375,10 +382,33 @@ impl EditorState {
             quit_asked: false,
             palette_request: None,
         };
+        if let Some(problem) = problem {
+            state.log(
+                LogLevel::Error,
+                format!("The Library could not be loaded: {problem}"),
+            );
+        }
+        let (scene, problem) = Scene::load_reporting();
+        state.workshop.scene = scene;
+        if let Some(problem) = problem {
+            state.log(
+                LogLevel::Error,
+                format!("The scene could not be loaded: {problem}"),
+            );
+        }
         for path in stored.roms {
-            if let Err(e) = state.library.import(&path) {
-                state.log(LogLevel::Warn, format!("Could not reload ROM: {e}"));
+            if let Err(e) = state.library.import_known(&path, &stored.known) {
+                state.log(
+                    LogLevel::Warn,
+                    format!("Could not reload ROM (it stays in the Library): {e}"),
+                );
+                state.missing_roms.push(path);
             }
+        }
+        state.known_roms = stored.known;
+        // Remember what was just read, so the next start can skip it.
+        if state.known_to_save() != state.known_roms {
+            state.save();
         }
         state.log(
             LogLevel::Info,
@@ -466,6 +496,10 @@ impl EditorState {
             match self.library.import(&path) {
                 Ok(entry) => {
                     let title = entry.info.title.clone();
+                    if let Some(i) = self.missing_roms.iter().position(|p| *p == path) {
+                        self.missing_roms.remove(i);
+                        changed = true;
+                    }
                     if self.library.entries().len() > before {
                         changed = true;
                         self.selected = Some(before);
@@ -508,20 +542,81 @@ impl EditorState {
         }
     }
 
+    /// The ROM paths to save: every Library entry, then the ones that couldn't be read this run.
+    pub fn remembered_roms(&self) -> Vec<PathBuf> {
+        remembered_roms(self.library.entries(), &self.missing_roms)
+    }
+
+    /// What to remember about each ROM file: fresh for the Library's entries, as last saved for
+    /// the missing ones.
+    fn known_to_save(&self) -> Vec<clockwork_library::KnownRom> {
+        let mut known: Vec<_> = self
+            .library
+            .entries()
+            .iter()
+            .filter_map(|e| self.library.known(e))
+            .collect();
+        known.extend(
+            self.known_roms
+                .iter()
+                .filter(|k| self.missing_roms.contains(&k.path))
+                .cloned(),
+        );
+        known
+    }
+
     pub fn save(&mut self) {
         let stored = store::Stored {
-            roms: self
-                .library
-                .entries()
-                .iter()
-                .map(|e| e.path.clone())
-                .collect(),
+            roms: self.remembered_roms(),
             fetch_box_art: self.fetch_box_art,
             names: self.names.clone(),
             decomps: self.decomps.clone(),
+            known: self.known_to_save(),
         };
         if let Err(e) = store::save(&stored) {
             self.log(LogLevel::Error, format!("Could not save the Library: {e}"));
         }
+    }
+}
+
+fn remembered_roms(entries: &[LibraryEntry], missing: &[PathBuf]) -> Vec<PathBuf> {
+    let mut roms: Vec<PathBuf> = entries.iter().map(|e| e.path.clone()).collect();
+    for path in missing {
+        if !roms.contains(path) {
+            roms.push(path.clone());
+        }
+    }
+    roms
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn roms_that_failed_to_reload_are_still_saved() {
+        let mut library = Library::new().with_platforms(clockwork_platforms::all());
+        let mut rom = vec![0u8; 0xc0];
+        rom[0xa0..0xa4].copy_from_slice(b"TEST");
+        rom[0xb2] = 0x96;
+        let checksum = rom[0xa0..0xbd]
+            .iter()
+            .fold(0u8, |sum, b| sum.wrapping_sub(*b))
+            .wrapping_sub(0x19);
+        rom[0xbd] = checksum;
+        library
+            .import_bytes(PathBuf::from("here.gba"), &rom)
+            .expect("a valid GBA header");
+        let missing = [
+            PathBuf::from("unplugged/drive.gba"),
+            PathBuf::from("here.gba"),
+        ];
+        assert_eq!(
+            remembered_roms(library.entries(), &missing),
+            [
+                PathBuf::from("here.gba"),
+                PathBuf::from("unplugged/drive.gba")
+            ]
+        );
     }
 }

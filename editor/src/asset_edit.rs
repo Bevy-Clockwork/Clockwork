@@ -194,7 +194,7 @@ impl AssetEditor {
             }
             ron::from_str::<Recipe>(text.trim_start_matches('\u{FEFF}'))
                 .map_err(|e| format!("Not saved: {e}"))?;
-            std::fs::write(&path, &text).map_err(|e| e.to_string())?;
+            clockwork_library::files::write_atomic(&path, &text).map_err(|e| e.to_string())?;
             Ok::<_, String>(())
         })();
         match result {
@@ -360,7 +360,7 @@ fn copy_into(dir: &Path, output: &Output) -> Result<OutputRef, String> {
         .replace('\n', &format!("\n{}", " ".repeat(indent)));
     let written = doc.appended(outputs, &item);
     ron::from_str::<Recipe>(&written).map_err(|e| e.to_string())?;
-    std::fs::write(&path, written).map_err(|e| e.to_string())?;
+    clockwork_library::files::write_atomic(&path, written).map_err(|e| e.to_string())?;
     Ok(OutputRef::new(MY_GAME, &id))
 }
 

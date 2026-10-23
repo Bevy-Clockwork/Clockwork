@@ -6,6 +6,7 @@ pub mod agents;
 pub mod boxart;
 pub mod content;
 mod cue;
+pub mod files;
 pub mod store;
 
 use std::path::{Path, PathBuf};
@@ -180,6 +181,89 @@ impl Library {
     }
 }
 
+/// What the Library remembers about an imported file, so the next start can skip reading and
+/// hashing it while the file is unchanged (same length and modification time). Holds the
+/// header's title and code and the hash, never game data.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct KnownRom {
+    pub path: PathBuf,
+    /// The file's length and modification time (seconds and nanoseconds since 1970).
+    pub file_len: u64,
+    pub modified: (u64, u32),
+    pub sha1: String,
+    pub size: u64,
+    pub platform: String,
+    pub title: String,
+    pub game_code: String,
+}
+
+/// The length and modification time of a file whose contents can be trusted to change only
+/// when they do. Cue sheets point at another file, so they are always read.
+fn stamp(path: &Path) -> Option<(u64, (u64, u32))> {
+    if path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("cue"))
+    {
+        return None;
+    }
+    let meta = std::fs::metadata(path).ok()?;
+    let modified = meta
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?;
+    Some((meta.len(), (modified.as_secs(), modified.subsec_nanos())))
+}
+
+impl Library {
+    /// What to remember about `entry` for [`Library::import_known`], if its file can be
+    /// recognized again without reading it.
+    pub fn known(&self, entry: &LibraryEntry) -> Option<KnownRom> {
+        let (file_len, modified) = stamp(&entry.path)?;
+        Some(KnownRom {
+            path: entry.path.clone(),
+            file_len,
+            modified,
+            sha1: entry.sha1.clone(),
+            size: entry.size,
+            platform: entry.info.platform.to_string(),
+            title: entry.info.title.clone(),
+            game_code: entry.info.game_code.clone(),
+        })
+    }
+
+    /// Imports `path`, trusting what `known` remembers about it while the file's length and
+    /// modification time are unchanged and its platform is registered; otherwise reads it.
+    pub fn import_known(
+        &mut self,
+        path: impl AsRef<Path>,
+        known: &[KnownRom],
+    ) -> Result<&LibraryEntry, ImportError> {
+        let path = path.as_ref();
+        let remembered = known.iter().find(|k| k.path == path).and_then(|k| {
+            let platform = self.platforms.iter().find(|p| p.id() == k.platform)?;
+            (stamp(path)? == (k.file_len, k.modified)).then(|| LibraryEntry {
+                path: path.to_path_buf(),
+                sha1: k.sha1.clone(),
+                size: k.size,
+                info: RomInfo {
+                    platform: platform.id(),
+                    title: k.title.clone(),
+                    game_code: k.game_code.clone(),
+                },
+            })
+        });
+        let Some(entry) = remembered else {
+            return self.import(path);
+        };
+        if let Some(i) = self.entries.iter().position(|e| e.sha1 == entry.sha1) {
+            return Ok(&self.entries[i]);
+        }
+        self.entries.push(entry);
+        Ok(self.entries.last().unwrap())
+    }
+}
+
 pub fn sha1_hex(data: &[u8]) -> String {
     Sha1::digest(data)
         .iter()
@@ -191,6 +275,41 @@ pub fn sha1_hex(data: &[u8]) -> String {
 mod tests {
     use super::*;
     use clockwork_gba::Gba;
+
+    #[test]
+    fn unchanged_files_are_recalled_without_reading_them() {
+        let dir = std::env::temp_dir().join(format!("clockwork-known-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("game.gba");
+        let mut rom = vec![0u8; 0xc0];
+        rom[0xa0..0xa4].copy_from_slice(b"TEST");
+        rom[0xb2] = 0x96;
+        rom[0xbd] = rom[0xa0..0xbd]
+            .iter()
+            .fold(0u8, |sum, b| sum.wrapping_sub(*b))
+            .wrapping_sub(0x19);
+        std::fs::write(&path, &rom).unwrap();
+
+        let mut first = Library::new().with_platform(Gba);
+        let entry = first.import(&path).unwrap().clone();
+        let mut known = first.known(&entry).unwrap();
+        // A remembered hash that differs from the file's proves the file wasn't read.
+        known.sha1 = "remembered".into();
+        let mut second = Library::new().with_platform(Gba);
+        assert_eq!(
+            second.import_known(&path, &[known.clone()]).unwrap().sha1,
+            "remembered"
+        );
+
+        // A changed file is read again.
+        rom.extend([0; 0x40]);
+        std::fs::write(&path, &rom).unwrap();
+        let mut third = Library::new().with_platform(Gba);
+        let reread = third.import_known(&path, &[known]).unwrap();
+        assert_eq!(reread.sha1, sha1_hex(&rom));
+        assert_eq!(reread.size, rom.len() as u64);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn sha1_of_empty_input() {

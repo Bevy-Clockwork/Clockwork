@@ -138,7 +138,7 @@ pub fn save_layout(dir: &Path, layout: &Layout) -> Result<(), String> {
     let text = format!(
         "// Where the plugin editor draws this composition's nodes. The plugin itself is compose.ron.\n{body}\n"
     );
-    std::fs::write(dir.join(LAYOUT_FILE), text).map_err(|e| e.to_string())
+    clockwork_library::files::write_atomic(dir.join(LAYOUT_FILE), text).map_err(|e| e.to_string())
 }
 
 /// The composition a graph stands for, and what keeps it from being saved as drawn.

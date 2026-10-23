@@ -2123,6 +2123,8 @@ mod tests {
     fn gameplay_keys_cannot_delete_the_scene_or_stop_play() {
         let mut state = EditorState {
             library: Default::default(),
+            missing_roms: Vec::new(),
+            known_roms: Vec::new(),
             selected: None,
             search: String::new(),
             agent_prompt: String::new(),

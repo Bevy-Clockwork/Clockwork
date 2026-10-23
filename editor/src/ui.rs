@@ -1027,6 +1027,29 @@ fn library_toolbar(
                     },
                     theme::PARCHMENT_DIM,
                 );
+                if !state.missing_roms.is_empty() {
+                    let paths: Vec<String> = state
+                        .missing_roms
+                        .iter()
+                        .map(|p| p.display().to_string())
+                        .collect();
+                    let forget = kit::pill(
+                        ui,
+                        &format!("{} missing", state.missing_roms.len()),
+                        theme::WARN,
+                    )
+                    .interact(egui::Sense::click())
+                    .on_hover_text(format!(
+                        "Couldn't be read this time, so they stay remembered:\n{}\n\nClick to forget them.",
+                        paths.join("\n")
+                    ))
+                    .clicked();
+                    if forget {
+                        state.missing_roms.clear();
+                        state.log(LogLevel::Info, "Forgot the missing ROMs");
+                        state.save();
+                    }
+                }
                 ui.add_space(14.0);
                 if platforms.len() > 1 {
                     let mut choice = view.platform;
