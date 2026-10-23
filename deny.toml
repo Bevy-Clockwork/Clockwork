@@ -23,8 +23,9 @@ confidence-threshold = 0.9
 [bans]
 # Bevy's dependency tree has many duplicate versions; they're not worth failing over.
 multiple-versions = "allow"
-wildcards = "deny"
-allow-wildcard-paths = true
+# Workspace crates depend on each other by path (no version), which cargo-deny counts as a
+# wildcard for crates that could be published.
+wildcards = "allow"
 
 [sources]
 unknown-registry = "deny"
