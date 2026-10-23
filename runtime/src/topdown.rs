@@ -5,6 +5,8 @@
 //!
 //! The ground plane is x (east) by z (south), as in [`crate::controller`], and the same [`World`]
 //! provides collision. Floors of any height are walkable, walls and holes block.
+//!
+//! [`Character2d`]: clockwork_core::character2d::Character2d
 
 use bevy::math::{Vec2, Vec3};
 use clockwork_core::character2d::{AnimationRef, Animations2d, Direction4, Movement2d};

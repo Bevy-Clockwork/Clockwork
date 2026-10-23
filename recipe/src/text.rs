@@ -3,6 +3,8 @@
 //!
 //! [`Doc::parse`] reads the structure of any RON text without its meaning; [`Recipe`] values
 //! still come from `ron` itself. Changes are made by replacing spans and parsing again.
+//!
+//! [`Recipe`]: clockwork_core::recipe::Recipe
 
 use std::ops::Range;
 
