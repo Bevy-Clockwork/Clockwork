@@ -364,10 +364,12 @@ Godot's FileSystem dock and Blender's Asset Browser (non-modal, non-blocking, se
   Character, Ability, Object, Audio; none → Other). Category tabs only show kinds that exist.
 - **Appear by themselves:** plugin folders are checked every 2 s (file names and modification
   times); new, changed or removed plugins update the browser without Rescan. The selected and
-  loaded plugin are kept across rescans.
-- **Previews** are generated in the background, one plugin at a time, and cached at
-  `<data>/cache/previews/<plugin>-<hash>/` (hash of manifest, recipe and ROM SHA-1), so they're
-  only regenerated when something changes. Items show "Generating…", "Needs ROM" or "No preview"
+  loaded plugin are kept across rescans. Only plugins that changed, and those using them, are
+  extracted again.
+- **Previews** are drawn in the background from the Workshop's extraction, one plugin at a
+  time, and cached at `<data>/cache/previews/<plugin>-<hash>/` (hash of manifest, recipe or
+  composition and ROM SHA-1), so they're only regenerated when something changes; folders of
+  earlier versions are removed. Items show "Generating…", "Needs ROM" or "No preview"
   instead; the UI never waits.
 - **Search** (name, plugin, game, kind), a **game filter** and a **thumbnail size** slider;
   filters survive refreshes. Very long sheets show their first square instead of a sliver.
@@ -696,7 +698,8 @@ screen's layout (plugins on the left, the selected one on the right):
   often describe a group), duplicates it (at the end, with the names it makes renamed) or removes
   it; Delete removes the selected nodes. Buffers show their first bytes in hex, sprites their
   first frame, and outputs what the whole recipe made of them (or the error of the output that
-  failed). Undo/Redo (and Ctrl+Z/Ctrl+Y) cover every change.
+  failed). After a change the recipe runs again in the background (nodes show the last run
+  until it is done). Undo/Redo (and Ctrl+Z/Ctrl+Y) cover every change.
   The graph is a view over `recipe.ron` as text (`clockwork_recipe::text`: where every value sits
   in RON): each change replaces a span and is parsed again before it is kept, so the agent's
   comments survive and nothing the format can't hold is written. **Save** writes `recipe.ron` and

@@ -712,6 +712,10 @@ pub struct RecipeGraph {
     rom: Option<Arc<Vec<u8>>>,
     trace: Trace,
     trace_dirty: bool,
+    /// A run in the background, started after an edit, and which run it is.
+    trace_job: Option<(u64, std::thread::JoinHandle<Trace>)>,
+    /// Counts runs, so a background run that finishes after a newer one is dropped.
+    trace_runs: u64,
     /// Bumped with every trace, so previews are made again.
     revision: u64,
     edits: HashMap<(RNode, String), String>,
@@ -784,6 +788,8 @@ impl RecipeGraph {
             plugin: String::new(),
             trace: Trace::default(),
             trace_dirty: true,
+            trace_job: None,
+            trace_runs: 0,
             revision: 0,
             edits: HashMap::new(),
             thumbs: HashMap::new(),
@@ -968,53 +974,81 @@ impl RecipeGraph {
         self.sizes.clear();
     }
 
-    /// Runs the recipe on the ROM and keeps what every step made.
+    /// Runs the recipe on the ROM and keeps what every step made. Used where the result is
+    /// needed right away (opening a plugin, scripted edits); edits in the graph run it in the
+    /// background instead (see [`RecipeGraph::start_trace`]).
     fn run_trace(&mut self) {
         self.trace_dirty = false;
+        self.trace_runs += 1;
+        self.trace_job = None;
+        self.trace = trace(
+            &self.recipe,
+            self.rom.as_deref().map(Vec::as_slice),
+            &self.assets,
+            &self.plugin,
+            &self.ports,
+        );
         self.revision += 1;
-        let Some(rom) = self.rom.clone() else {
-            self.trace = Trace {
-                error: Some("Its game isn't in the Library, so nothing can be shown".into()),
-                ..Trace::default()
-            };
+    }
+
+    /// Starts running the recipe in the background; the nodes keep showing what the last run
+    /// made until it is done, so a big recipe never holds up the editor.
+    fn start_trace(&mut self) {
+        self.trace_dirty = false;
+        self.trace_runs += 1;
+        let recipe = self.recipe.clone();
+        let rom = self.rom.clone();
+        let assets = self.assets.clone();
+        let plugin = self.plugin.clone();
+        let ports = self.ports.clone();
+        let started = std::thread::Builder::new()
+            .name("recipe trace".into())
+            .spawn(move || {
+                trace(
+                    &recipe,
+                    rom.as_deref().map(Vec::as_slice),
+                    &assets,
+                    &plugin,
+                    &ports,
+                )
+            });
+        match started {
+            Ok(job) => self.trace_job = Some((self.trace_runs, job)),
+            Err(_) => self.run_trace(),
+        }
+    }
+
+    /// Keeps the background run's result once it is done, unless a newer run started since.
+    fn poll_trace(&mut self) {
+        if !self
+            .trace_job
+            .as_ref()
+            .is_some_and(|(_, job)| job.is_finished())
+        {
+            return;
+        }
+        let Some((run, job)) = self.trace_job.take() else {
             return;
         };
-        let mut steps = vec![None; self.recipe.steps.len()];
-        let ports = &self.ports;
-        let assets = self.assets.with_recipe(&self.plugin, &self.recipe);
-        let result = clockwork_recipe::run_observed(&self.recipe, &rom, &assets, |i, made| {
-            steps[i] = Some(summarize(&ports[&RNode::Step(i)], made));
-        });
-        let (outputs, error, error_step, error_output) = match result {
-            Ok(extracted) => (
-                summarize_outputs(&self.recipe, &extracted),
-                None,
-                None,
-                None,
-            ),
-            Err(e) => {
-                let output = e
-                    .output()
-                    .and_then(|id| self.recipe.outputs.iter().position(|o| o.id() == id));
-                // An unknown name in an output names what it's made from, not its id.
-                let output = output.or(match &e {
-                    clockwork_recipe::RecipeError::UnknownOutput(from) => self
-                        .recipe
-                        .outputs
-                        .iter()
-                        .position(|o| o.ports().iter().any(|p| p.name == from.as_str())),
-                    _ => None,
-                });
-                (Vec::new(), Some(e.to_string()), e.step(), output)
+        match job.join() {
+            Ok(made) if run == self.trace_runs => {
+                self.trace = made;
+                self.revision += 1;
             }
-        };
-        self.trace = Trace {
-            steps,
-            outputs,
-            error,
-            error_step,
-            error_output,
-        };
+            Ok(_) => {}
+            Err(_) => {
+                self.trace = Trace {
+                    error: Some("Running the recipe failed unexpectedly".into()),
+                    ..Trace::default()
+                };
+                self.revision += 1;
+            }
+        }
+    }
+
+    /// Whether the recipe is running again after a change.
+    pub fn running(&self) -> bool {
+        self.trace_job.is_some()
     }
 
     /// The text of the recipe's node for a step or output.
@@ -1665,9 +1699,14 @@ impl RecipeGraph {
         if self.arrange_pending {
             ui.ctx().request_repaint();
         }
-        // Run the recipe again once a drag is over.
-        if self.trace_dirty && !ui.input(|i| i.pointer.any_down()) {
-            self.run_trace();
+        // Run the recipe again once a drag is over, in the background, one run at a time.
+        self.poll_trace();
+        if self.trace_dirty && self.trace_job.is_none() && !ui.input(|i| i.pointer.any_down()) {
+            self.start_trace();
+        }
+        if self.trace_job.is_some() {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(30));
         }
         Shown { arranged }
     }
@@ -2033,6 +2072,51 @@ impl RecipeGraph {
                 info.pos = pos;
             }
         }
+    }
+}
+
+/// Runs a recipe on the ROM and keeps what every step made.
+fn trace(
+    recipe: &Recipe,
+    rom: Option<&[u8]>,
+    assets: &clockwork_recipe::assets::OwnedAssets,
+    plugin: &str,
+    ports: &HashMap<RNode, Vec<OwnedPort>>,
+) -> Trace {
+    let Some(rom) = rom else {
+        return Trace {
+            error: Some("Its game isn't in the Library, so nothing can be shown".into()),
+            ..Trace::default()
+        };
+    };
+    let mut steps = vec![None; recipe.steps.len()];
+    let assets = assets.with_recipe(plugin, recipe);
+    let result = clockwork_recipe::run_observed(recipe, rom, &assets, |i, made| {
+        steps[i] = Some(summarize(&ports[&RNode::Step(i)], made));
+    });
+    let (outputs, error, error_step, error_output) = match result {
+        Ok(extracted) => (summarize_outputs(recipe, &extracted), None, None, None),
+        Err(e) => {
+            let output = e
+                .output()
+                .and_then(|id| recipe.outputs.iter().position(|o| o.id() == id));
+            // An unknown name in an output names what it's made from, not its id.
+            let output = output.or(match &e {
+                clockwork_recipe::RecipeError::UnknownOutput(from) => recipe
+                    .outputs
+                    .iter()
+                    .position(|o| o.ports().iter().any(|p| p.name == from.as_str())),
+                _ => None,
+            });
+            (Vec::new(), Some(e.to_string()), e.step(), output)
+        }
+    };
+    Trace {
+        steps,
+        outputs,
+        error,
+        error_step,
+        error_output,
     }
 }
 

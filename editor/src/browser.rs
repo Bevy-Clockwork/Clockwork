@@ -19,14 +19,14 @@ use bevy_egui::{
     egui::{self, Color32, RichText, Stroke, vec2},
 };
 use clockwork_core::{asset::OutputRef, image::RgbaImage, recipe::Kind};
-use clockwork_library::{Library, LibraryEntry};
-use clockwork_recipe::{Plugin, assets::AssetIndex, preview};
+use clockwork_recipe::{Extracted, Plugin, assets::AssetIndex, preview};
 
 use crate::{
     scene::ROOT,
     settings::Settings,
     state::{EditorState, LogLevel, plugin_dirs},
     store, theme,
+    workshop::Extractions,
 };
 
 /// Previews are stored at most this many pixels on their longer side.
@@ -112,6 +112,10 @@ pub struct Browser {
     pub generating: Option<String>,
     fingerprint: u64,
     last_poll: f64,
+    /// Every asset, as last listed, and what it was listed for (see [`items_key`]).
+    items: Option<(u64, std::sync::Arc<Vec<Item>>)>,
+    /// Each plugin's preview cache key (see [`cache_key`]), and what they were made for.
+    keys: Option<(u64, Vec<PluginKey>)>,
 }
 
 impl Default for Browser {
@@ -130,6 +134,8 @@ impl Default for Browser {
             generating: None,
             fingerprint: 0,
             last_poll: f64::NEG_INFINITY,
+            items: None,
+            keys: None,
         }
     }
 }
@@ -138,6 +144,31 @@ impl Browser {
     /// The preview of a plugin output, once generated.
     pub fn preview(&self, plugin: &str, output: &str) -> Option<&egui::TextureHandle> {
         self.previews.get(&(plugin.to_string(), output.to_string()))
+    }
+}
+
+/// What the asset list depends on: the plugins, and the Library's games and their names (which
+/// give items their game and whether it is ready).
+fn items_key(state: &EditorState) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    state.workshop.plugins_revision.hash(&mut hasher);
+    for entry in state.library.entries() {
+        entry.sha1.hash(&mut hasher);
+    }
+    state.names.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Every asset, listed again only when the plugins or the Library changed.
+fn cached_items(state: &EditorState, browser: &mut Browser) -> std::sync::Arc<Vec<Item>> {
+    let key = items_key(state);
+    match &browser.items {
+        Some((k, items)) if *k == key => items.clone(),
+        _ => {
+            let listed = std::sync::Arc::new(items(state));
+            browser.items = Some((key, listed.clone()));
+            listed
+        }
     }
 }
 
@@ -201,7 +232,7 @@ fn fingerprint() -> u64 {
         folders.sort();
         for folder in folders {
             folder.hash(&mut hasher);
-            for file in ["clockwork.toml", "recipe.ron"] {
+            for file in ["clockwork.toml", "recipe.ron", "compose.ron"] {
                 let modified = std::fs::metadata(folder.join(file))
                     .and_then(|m| m.modified())
                     .unwrap_or(SystemTime::UNIX_EPOCH);
@@ -245,8 +276,39 @@ fn cache_key_at(state: &EditorState, plugin: &Plugin, depth: usize) -> Option<St
     ))
 }
 
+fn cache_root() -> Option<PathBuf> {
+    store::data_dir().map(|d| d.join("cache").join("previews"))
+}
+
 fn cache_dir(key: &str) -> Option<PathBuf> {
-    store::data_dir().map(|d| d.join("cache").join("previews").join(key))
+    cache_root().map(|root| root.join(key))
+}
+
+/// Removes cached previews made for an earlier version of a plugin that now has other ones.
+/// Folders of plugins that aren't installed, or can't be extracted right now, are kept.
+fn prune_cache(keys: &[PluginKey]) {
+    let Some(entries) = cache_root().and_then(|root| std::fs::read_dir(root).ok()) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let folder = entry.file_name().to_string_lossy().into_owned();
+        if outdated(&folder, keys) {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+/// Whether a cache folder (`<plugin>-<16 hex digits>`) is of an installed plugin whose previews
+/// now have another key.
+fn outdated(folder: &str, keys: &[PluginKey]) -> bool {
+    keys.iter().any(|(name, key)| {
+        let Some(key) = key else { return false };
+        let hash = folder
+            .strip_prefix(name.as_str())
+            .and_then(|rest| rest.strip_prefix('-'));
+        hash.is_some_and(|h| h.len() == 16 && h.chars().all(|c| c.is_ascii_hexdigit()))
+            && folder != key
+    })
 }
 
 fn upload(ctx: &egui::Context, name: &str, image: &RgbaImage) -> egui::TextureHandle {
@@ -261,14 +323,19 @@ fn upload(ctx: &egui::Context, name: &str, image: &RgbaImage) -> egui::TextureHa
     )
 }
 
-type PreviewJob = (String, String, Result<Vec<(String, RgbaImage)>, String>);
+/// A plugin's name and its preview cache key, `None` while it can't be extracted.
+type PluginKey = (String, Option<String>);
 
-/// Picks up plugin changes and generates previews, one plugin at a time, in the background.
+type PreviewJob = (String, String, Vec<(String, RgbaImage)>);
+
+/// Picks up plugin changes and makes previews, one plugin at a time, in the background, from
+/// what the Workshop extracted.
 pub fn browser_system(
     mut contexts: EguiContexts,
     mut state: ResMut<EditorState>,
     settings: Res<Settings>,
     mut browser: ResMut<Browser>,
+    mut extractions: ResMut<Extractions>,
     mut job: Local<Option<Task<PreviewJob>>>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?.clone();
@@ -286,37 +353,50 @@ pub fn browser_system(
     }
 
     // A finished preview job.
-    if let Some((name, key, result)) = job.as_mut().and_then(|t| block_on(poll_once(t))) {
+    if let Some((name, key, images)) = job.as_mut().and_then(|t| block_on(poll_once(t))) {
         *job = None;
         browser.generating = None;
-        match result {
-            Ok(images) => {
-                for (output, image) in images {
-                    let texture = upload(&ctx, &format!("{name}-{output}"), &image);
-                    browser.previews.insert((name.clone(), output), texture);
-                }
-                browser.failed.remove(&name);
-            }
-            Err(e) => {
-                state.log(LogLevel::Warn, format!("{name}: no preview ({e})"));
-                browser.failed.insert(name, e);
-            }
+        for (output, image) in images {
+            let texture = upload(&ctx, &format!("{name}-{output}"), &image);
+            browser.previews.insert((name.clone(), output), texture);
         }
+        browser.failed.remove(&name);
         browser.handled.insert(key);
     }
     if job.is_some() {
         return Ok(());
     }
 
+    // Cache keys read the plugins' files, so they are made only when plugins or games change.
+    let listed = items_key(&state);
+    if browser.keys.as_ref().is_none_or(|(k, _)| *k != listed) {
+        let keys: Vec<PluginKey> = state
+            .workshop
+            .plugins
+            .iter()
+            .map(|p| (p.name().to_string(), cache_key(&state, p)))
+            .collect();
+        prune_cache(&keys);
+        browser.keys = Some((listed, keys));
+    }
+
     // The next plugin without previews.
-    let next = state.workshop.plugins.iter().find_map(|plugin| {
-        let key = cache_key(&state, plugin)?;
-        (!browser.handled.contains(&key)).then(|| (plugin.clone(), key))
+    let next = browser.keys.as_ref().and_then(|(_, keys)| {
+        keys.iter().find_map(|(name, key)| {
+            let key = key.as_ref()?;
+            (!browser.handled.contains(key)).then(|| (name.clone(), key.clone()))
+        })
     });
-    let Some((plugin, key)) = next else {
+    let Some((name, key)) = next else {
         return Ok(());
     };
-    let name = plugin.manifest.plugin.name.clone();
+    let Some(plugin) = state
+        .workshop
+        .plugin_index(&name)
+        .map(|i| state.workshop.plugins[i].clone())
+    else {
+        return Ok(());
+    };
     let outputs: Vec<String> = plugin.items().into_iter().map(|(id, _)| id).collect();
 
     // Cached previews load straight from disk.
@@ -341,36 +421,29 @@ pub fn browser_system(
         return Ok(());
     }
 
-    // Otherwise run the recipe (or the composition and the plugins it uses) in the background.
+    // Otherwise wait for the Workshop's extraction (the plugin editor and the scene use the same
+    // one), then draw the previews in the background.
     browser.generating = Some(name.clone());
-    let plugins = state.workshop.plugins.clone();
-    let roms: Vec<(String, LibraryEntry)> = plugins
-        .iter()
-        .filter_map(|p| Some((p.name().to_string(), state.rom_for(p)?.clone())))
-        .collect();
+    extractions.ensure(&mut state, &name);
+    if let Some(e) = extractions.error(&name) {
+        // Extractions already logged why.
+        browser.failed.insert(name.clone(), e.to_string());
+        browser.generating = None;
+        browser.handled.insert(key);
+        return Ok(());
+    }
+    let Some(extracted) = extractions.shared(&name) else {
+        return Ok(());
+    };
     *job = Some(AsyncComputeTaskPool::get().spawn(async move {
-        let result = generate(&plugin, &plugins, &roms, &key);
-        (name, key, result)
+        let images = generate(&extracted, &key);
+        (name, key, images)
     }));
     Ok(())
 }
 
-/// Runs a plugin and returns (and caches) a small preview of each output.
-fn generate(
-    plugin: &Plugin,
-    plugins: &[Plugin],
-    roms: &[(String, LibraryEntry)],
-    key: &str,
-) -> Result<Vec<(String, RgbaImage)>, String> {
-    let library = Library::new().with_platforms(clockwork_platforms::all());
-    let rom = |p: &Plugin| {
-        let (_, entry) = roms
-            .iter()
-            .find(|(name, _)| name == p.name())
-            .ok_or_else(|| format!("{}: its game is not in the Library", p.name()))?;
-        library.rom_bytes(entry).map_err(|e| e.to_string())
-    };
-    let extracted = plugin.extract(plugins, &rom)?;
+/// Returns (and caches) a small preview of each output a plugin extracted.
+fn generate(extracted: &Extracted, key: &str) -> Vec<(String, RgbaImage)> {
     let dir = cache_dir(key);
     if let Some(dir) = &dir {
         let _ = std::fs::create_dir_all(dir);
@@ -407,7 +480,8 @@ fn generate(
     let mut previews = Vec::new();
     for (id, image) in extracted
         .images
-        .into_iter()
+        .iter()
+        .cloned()
         .chain(models.collect::<Vec<_>>())
         .chain(sprites.collect::<Vec<_>>())
     {
@@ -427,7 +501,7 @@ fn generate(
         }
         previews.push((id, small));
     }
-    Ok(previews)
+    previews
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -455,7 +529,7 @@ fn matches(item: &Item, browser: &Browser) -> bool {
 
 /// The content browser panel. Returns an item to open, if the user opened one.
 pub fn content_panel(ui: &mut egui::Ui, state: &mut EditorState, browser: &mut Browser) {
-    let all = items(state);
+    let all = cached_items(state, browser);
 
     // Filters and thumbnail size, then the category tabs (only kinds that exist), which wrap.
     ui.horizontal(|ui| {
@@ -749,4 +823,31 @@ fn card(ui: &mut egui::Ui, item: &Item, browser: &mut Browser) -> (bool, bool) {
         response.double_clicked() && (item.ready || item.asset_kind == "Behavior"),
         response.clicked(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_outdated_previews_of_installed_plugins_are_pruned() {
+        let keys = vec![
+            ("tmc".to_string(), Some("tmc-00000000000000aa".to_string())),
+            (
+                "tmc-link".to_string(),
+                Some("tmc-link-00000000000000bb".to_string()),
+            ),
+            ("sm64".to_string(), None),
+        ];
+        // An earlier version of an installed plugin.
+        assert!(outdated("tmc-00000000000000ff", &keys));
+        assert!(outdated("tmc-link-00000000000000ff", &keys));
+        // The current ones.
+        assert!(!outdated("tmc-00000000000000aa", &keys));
+        assert!(!outdated("tmc-link-00000000000000bb", &keys));
+        // A plugin that can't be extracted right now, one that isn't installed, other folders.
+        assert!(!outdated("sm64-00000000000000ff", &keys));
+        assert!(!outdated("other-00000000000000ff", &keys));
+        assert!(!outdated("tmc-notes", &keys));
+    }
 }
