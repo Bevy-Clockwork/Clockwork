@@ -812,10 +812,10 @@ pub fn play_system(
     };
 
     // Every kind alike: the buttons, the steps, the scene's behaviors and what they did.
-    if let PlayedBody::Model(m) = &mut played.body {
-        if jump {
-            m.jump_buffer = JUMP_BUFFER;
-        }
+    if let PlayedBody::Model(m) = &mut played.body
+        && jump
+    {
+        m.jump_buffer = JUMP_BUFFER;
     }
     played.fighter.feed(&buttons, &requests);
     played.leftover += sim_dt;
