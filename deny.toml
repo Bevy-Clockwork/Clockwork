@@ -1,0 +1,38 @@
+# cargo-deny: licenses, security advisories and crate sources for the locked dependency graph.
+# The license list matches about.toml, which generates the release's third-party notices.
+
+[graph]
+all-features = false
+
+[advisories]
+# Unmaintained crates are reported but don't fail CI; vulnerabilities do.
+unmaintained = "none"
+yanked = "deny"
+ignore = [
+    # ruzstd < 0.9.1 can be made to allocate gigabytes by a crafted .zst stream. It comes only
+    # from bevy_image (zstd-compressed KTX2 textures), which pins ^0.8; Clockwork doesn't load
+    # KTX2 files from untrusted sources. Drop this once Bevy moves to ruzstd >= 0.9.1.
+    { id = "RUSTSEC-2026-0344", reason = "only via bevy_image, which pins ruzstd ^0.8" },
+]
+
+[licenses]
+allow = [
+    "MIT", "MIT-0", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Zlib",
+    "CC0-1.0", "Unlicense", "Unicode-3.0", "OFL-1.1", "BSL-1.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "Ubuntu-font-1.0", "CDLA-Permissive-2.0",
+    # about.toml accepts MPL-2.0 with the source archive linked in the notices.
+    "MPL-2.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+# Bevy's dependency tree has many duplicate versions; they're not worth failing over.
+multiple-versions = "allow"
+# Workspace crates depend on each other by path (no version), which cargo-deny counts as a
+# wildcard for crates that could be published.
+wildcards = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

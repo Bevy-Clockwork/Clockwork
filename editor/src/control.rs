@@ -3,7 +3,8 @@
 //! When `CLOCKWORK_CONTROL` names a folder, the editor runs every `*.ron` file put there (oldest
 //! name first): a list of [`Command`]s, e.g. `[Screen(Workshop), Frame("Hero"), Wait(10),
 //! Screenshot("shot.png")]`. Each file is deleted once read; `<name>.done` is written when its
-//! commands have run (with any errors), so scripts can wait for it.
+//! commands have run (with any errors), so scripts can wait for it. Files are read as soon as
+//! they appear: write one under another extension and rename it to `.ron` once complete.
 
 use std::path::{Path, PathBuf};
 

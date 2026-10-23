@@ -19,7 +19,7 @@ pub const STALE: Duration = Duration::from_secs(12);
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentStatus {
     pub pid: u32,
-    /// "stdio" or "http <address>".
+    /// `"stdio"` or `"http <address>"`.
     pub transport: String,
     /// The connected client's name and version, from the MCP handshake.
     #[serde(default)]
