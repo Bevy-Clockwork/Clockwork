@@ -113,6 +113,8 @@ const STEP_HEIGHT: f32 = 0.3;
 const TURN_TIME: f32 = 0.5;
 const SKID_STOPPED_TIME: f32 = 0.5;
 const INPUT_EPSILON: f32 = 0.0001;
+/// How long after walking off a ledge a jump still works ("coyote time"), in seconds.
+pub const COYOTE_TIME: f32 = 0.1;
 
 fn wrapped(angle: f32) -> f32 {
     (angle + PI).rem_euclid(TAU) - PI
@@ -174,11 +176,41 @@ fn clear(position: Vec3, radius: f32, world: &impl World) -> bool {
         })
 }
 
-/// Advances by seconds; nonpositive or nonfinite time leaves the body unchanged.
-pub fn step(body: &mut Body, input: &Input, movement: &Movement, world: &impl World, dt: f32) {
+/// Starts the next jump of the chain (or the first), from the ground or just off a ledge.
+fn start_jump(body: &mut Body, movement: &Movement) {
+    let index = body
+        .chain
+        .and_then(|(i, time)| {
+            i.checked_add(1).filter(|&next| {
+                time <= movement.chain_window
+                    && movement
+                        .jumps
+                        .get(next)
+                        .is_some_and(|jump| body.speed >= jump.min_ground_speed)
+            })
+        })
+        .unwrap_or(0);
+    let jump = &movement.jumps[index];
+    body.vertical = jump.speed + jump.speed_from_ground * body.speed;
+    body.speed *= jump.keep_ground_speed;
+    body.grounded = false;
+    body.chain = None;
+    body.enter(MoveState::Jump(index));
+}
+
+/// Advances by seconds; nonpositive or nonfinite time leaves the body unchanged. Returns whether
+/// a jump started, so callers buffering a press know it was used.
+pub fn step(
+    body: &mut Body,
+    input: &Input,
+    movement: &Movement,
+    world: &impl World,
+    dt: f32,
+) -> bool {
     if !dt.is_finite() || dt <= 0.0 {
-        return;
+        return false;
     }
+    let mut jumped = false;
     let old_yaw = body.yaw;
     body.state_time += dt;
     if let Some((_, time)) = &mut body.chain {
@@ -245,29 +277,23 @@ pub fn step(body: &mut Body, input: &Input, movement: &Movement, world: &impl Wo
         }
 
         if input.jump_pressed && !movement.jumps.is_empty() {
-            let index = body
-                .chain
-                .and_then(|(i, time)| {
-                    i.checked_add(1).filter(|&next| {
-                        time <= movement.chain_window
-                            && movement
-                                .jumps
-                                .get(next)
-                                .is_some_and(|jump| body.speed >= jump.min_ground_speed)
-                    })
-                })
-                .unwrap_or(0);
-            let jump = &movement.jumps[index];
-            body.vertical = jump.speed + jump.speed_from_ground * body.speed;
-            body.speed *= jump.keep_ground_speed;
-            body.grounded = false;
-            body.chain = None;
-            body.enter(MoveState::Jump(index));
+            start_jump(body, movement);
+            jumped = true;
         }
     } else {
         if !matches!(body.state, MoveState::Jump(_) | MoveState::Fall) {
             body.enter(MoveState::Fall);
             body.chain = None;
+        }
+        // Just walked off a ledge: the jump still counts, as if pressed on the edge.
+        if input.jump_pressed
+            && !movement.jumps.is_empty()
+            && body.state == MoveState::Fall
+            && body.state_time <= COYOTE_TIME
+            && body.vertical <= 0.0
+        {
+            start_jump(body, movement);
+            jumped = true;
         }
         if has_input && movement.air.turn {
             turn(body, target_yaw, movement, dt);
@@ -355,9 +381,10 @@ pub fn step(body: &mut Body, input: &Input, movement: &Movement, world: &impl Wo
 
     if body.position.y < body.start.y - 30.0 {
         *body = Body::new(body.start, body.yaw);
-        return;
+        return jumped;
     }
     body.turn_rate = wrapped(body.yaw - old_yaw) / dt;
+    jumped
 }
 
 /// A clip choice and the playback controls needed to display it.
@@ -830,6 +857,56 @@ mod tests {
             0.01,
         );
         assert!(b.grounded);
+    }
+
+    /// Runs off a ledge into a 5 m drop and returns the body on its first falling step.
+    fn off_the_edge(m: &Movement) -> Body {
+        let mut b = running(6.0);
+        for _ in 0..100 {
+            step(&mut b, &forward(), m, &Ledge(-5.0), 0.01);
+            if b.state == MoveState::Fall {
+                return b;
+            }
+        }
+        panic!("never left the ledge");
+    }
+
+    #[test]
+    fn a_jump_just_after_leaving_a_ledge_still_counts() {
+        let m = movement();
+        let jump = Input {
+            jump_pressed: true,
+            jump_held: true,
+            ..forward()
+        };
+        let mut b = off_the_edge(&m);
+        for _ in 0..5 {
+            step(&mut b, &forward(), &m, &Ledge(-5.0), 0.01);
+        }
+        assert!(step(&mut b, &jump, &m, &Ledge(-5.0), 0.01));
+        assert_eq!(b.state, MoveState::Jump(0));
+        assert!(b.vertical > 0.0);
+
+        let mut late = off_the_edge(&m);
+        for _ in 0..((COYOTE_TIME / 0.01) as usize + 2) {
+            step(&mut late, &forward(), &m, &Ledge(-5.0), 0.01);
+        }
+        assert!(!step(&mut late, &jump, &m, &Ledge(-5.0), 0.01));
+        assert_eq!(late.state, MoveState::Fall);
+    }
+
+    #[test]
+    fn step_reports_jumps_only_when_one_starts() {
+        let m = movement();
+        let press = Input {
+            jump_pressed: true,
+            ..forward()
+        };
+        let mut b = running(6.0);
+        assert!(step(&mut b, &press, &m, &Flat, 0.01));
+        // In the air the press does nothing, so a caller keeps it buffered.
+        assert!(!step(&mut b, &press, &m, &Flat, 0.01));
+        assert!(matches!(b.state, MoveState::Jump(0)));
     }
 
     fn peak(held: bool, controllable: bool) -> f32 {
