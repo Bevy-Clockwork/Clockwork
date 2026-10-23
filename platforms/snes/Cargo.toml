@@ -1,0 +1,9 @@
+[package]
+name = "clockwork_snes"
+description = "Super Nintendo cartridge identification for Clockwork"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+clockwork_core.workspace = true

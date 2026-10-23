@@ -1,0 +1,21 @@
+[package]
+name = "clockwork_library"
+description = "ROM import, hashing and metadata for Clockwork"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+clockwork_core.workspace = true
+directories.workspace = true
+ron.workspace = true
+serde.workspace = true
+sha1.workspace = true
+thiserror.workspace = true
+ureq.workspace = true
+zip.workspace = true
+
+[dev-dependencies]
+clockwork_gba.workspace = true
+clockwork_n64.workspace = true
+clockwork_platforms.workspace = true

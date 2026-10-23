@@ -1,0 +1,10 @@
+[package]
+name = "clockwork_gba"
+description = "Game Boy Advance platform module for Clockwork"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+clockwork_core.workspace = true
+thiserror.workspace = true

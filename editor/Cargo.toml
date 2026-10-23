@@ -1,0 +1,25 @@
+[package]
+name = "clockwork_editor"
+description = "The Clockwork Editor: browse the Library and combine plugins"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "clockwork"
+path = "src/main.rs"
+
+[dependencies]
+bevy.workspace = true
+bevy_egui.workspace = true
+clockwork_core.workspace = true
+clockwork_library.workspace = true
+clockwork_platforms.workspace = true
+clockwork_recipe.workspace = true
+clockwork_runtime.workspace = true
+directories.workspace = true
+egui-snarl = "0.12"
+image.workspace = true
+rfd.workspace = true
+ron.workspace = true
+serde.workspace = true

@@ -1,0 +1,56 @@
+[workspace]
+resolver = "3"
+members = [
+    "core",
+    "runtime",
+    "platforms/gba",
+    "platforms/n64",
+    "platforms/snes",
+    "platforms/nds",
+    "platforms/playstation",
+    "platforms/pc",
+    "platforms/all",
+    "agent",
+    "library",
+    "recipe",
+    "editor",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+clockwork_core = { path = "core" }
+clockwork_runtime = { path = "runtime" }
+clockwork_gba = { path = "platforms/gba" }
+clockwork_n64 = { path = "platforms/n64" }
+clockwork_snes = { path = "platforms/snes" }
+clockwork_nds = { path = "platforms/nds" }
+clockwork_playstation = { path = "platforms/playstation" }
+clockwork_pc = { path = "platforms/pc" }
+clockwork_platforms = { path = "platforms/all" }
+clockwork_agent = { path = "agent" }
+clockwork_library = { path = "library" }
+clockwork_recipe = { path = "recipe" }
+
+bevy = { version = "0.20", features = ["wav"] }
+bevy_egui = "0.43"
+directories = "6"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+rfd = "0.17"
+ron = "0.12"
+serde = { version = "1", features = ["derive"] }
+sha1 = "0.11"
+thiserror = "2"
+toml = "1"
+ureq = "3"
+zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+# Bevy is slow in debug builds; optimize dependencies but keep our own code fast to compile.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

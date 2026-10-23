@@ -1,0 +1,45 @@
+/target
+/dist/
+
+# Local credentials and signing material.
+.env
+.env.*
+!.env.example
+*.pfx
+*.p12
+
+# Code knowledge graph (rebuild with `graphify update .`).
+/graphify-out/
+
+# Local assistant setup (graphify rules and hooks; machine-specific paths).
+/CLAUDE.md
+/.claude/
+
+# Never commit games or anything extracted from them.
+*.gba
+*.z64
+*.n64
+*.v64
+*.sfc
+*.smc
+*.nds
+*.iso
+*.bin
+*.cue
+*.exe
+*.elf
+*.ps-exe
+*.chd
+*.cso
+*.pbp
+*.sav
+/roms/
+/extracted/
+
+# Plugins and game knowledge live in content folders outside this repository (see
+# DESIGN.md §5.4), so Clockwork itself ships with nothing specific to a game.
+/plugins/
+/knowledge/*/
+
+# Local test runs (editor data, builds, pictures from your own ROM).
+/scratch/

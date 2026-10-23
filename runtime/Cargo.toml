@@ -1,0 +1,15 @@
+[package]
+name = "clockwork_runtime"
+description = "Generic Bevy systems that plugins configure"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bevy.workspace = true
+clockwork_core.workspace = true
+
+[dev-dependencies]
+clockwork_n64.workspace = true
+clockwork_recipe.workspace = true
+ron.workspace = true

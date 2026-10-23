@@ -1,0 +1,18 @@
+[package]
+name = "clockwork_recipe"
+description = "Loads Clockwork plugins and runs their extraction recipes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+clockwork_core.workspace = true
+clockwork_gba.workspace = true
+clockwork_n64.workspace = true
+ron.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+clockwork_library.workspace = true
+clockwork_platforms.workspace = true
+image = { workspace = true }

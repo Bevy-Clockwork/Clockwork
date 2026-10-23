@@ -1,0 +1,9 @@
+[package]
+name = "clockwork_nds"
+description = "Nintendo DS cartridge identification for Clockwork"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+clockwork_core.workspace = true

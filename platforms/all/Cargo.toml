@@ -1,0 +1,15 @@
+[package]
+name = "clockwork_platforms"
+description = "Every platform module Clockwork ships with"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+clockwork_core.workspace = true
+clockwork_gba.workspace = true
+clockwork_n64.workspace = true
+clockwork_snes.workspace = true
+clockwork_nds.workspace = true
+clockwork_playstation.workspace = true
+clockwork_pc.workspace = true

@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Clockwork — third-party notices</title>
+  <style>
+    body { font-family: system-ui, sans-serif; line-height: 1.5; max-width: 70rem; margin: 2rem auto; padding: 0 1rem; }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 1rem; background: #f3f3f3; }
+    section { margin-block: 3rem; }
+  </style>
+</head>
+<body>
+  <h1>Clockwork — third-party notices</h1>
+  <p>Licenses and attribution for the locked Rust dependencies used to build the Windows release.
+     Clockwork itself is available under MIT or Apache-2.0; see the accompanying license files.</p>
+  <p>System fonts are read from the operating system when available and are not redistributed.</p>
+  <p>Unmodified dependency source code, including the MPL-2.0 licensed option-ext crate,
+     is available in the versioned source archives linked below.</p>
+  {{#each licenses}}
+  <section>
+    <h2>{{name}}</h2>
+    <ul>
+      {{#each used_by}}
+      <li>{{crate.name}} {{crate.version}}{{#if crate.source}} —
+        <a href="https://crates.io/api/v1/crates/{{crate.name}}/{{crate.version}}/download">source archive</a>{{/if}}</li>
+      {{/each}}
+    </ul>
+    <pre>{{text}}</pre>
+  </section>
+  {{/each}}
+</body>
+</html>
