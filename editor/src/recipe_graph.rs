@@ -473,7 +473,7 @@ pub fn save_layout(dir: &Path, layout: &RecipeLayout) -> Result<(), String> {
     let text = format!(
         "// Where the plugin editor draws this recipe's nodes. The plugin itself is recipe.ron.\n{body}\n"
     );
-    std::fs::write(dir.join(LAYOUT_FILE), text).map_err(|e| e.to_string())
+    clockwork_library::files::write_atomic(dir.join(LAYOUT_FILE), text).map_err(|e| e.to_string())
 }
 
 /// New steps and outputs, as written in RON. Names starting with `new_` get a number that makes

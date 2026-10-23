@@ -65,8 +65,14 @@ fn main() {
             std::process::exit(1);
         }
     });
-    let settings = settings::Settings::load();
+    let (settings, settings_problem) = settings::Settings::load_reporting();
     let mut state = EditorState::load();
+    if let Some(problem) = settings_problem {
+        state.log(
+            state::LogLevel::Error,
+            format!("Settings could not be loaded: {problem}"),
+        );
+    }
     state.workshop.show_surfaces = settings.show_surfaces;
     let title = player
         .as_ref()

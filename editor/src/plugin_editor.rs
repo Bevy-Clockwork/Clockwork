@@ -275,7 +275,8 @@ pub fn create(content: &Path, name: &str) -> Result<PathBuf, String> {
          [source]\ngame = \"{COMPOSITION_GAME}\"\nsha1 = []\n",
         clockwork_core::CORE_VERSION
     );
-    std::fs::write(dir.join("clockwork.toml"), manifest).map_err(|e| e.to_string())?;
+    clockwork_library::files::write_atomic(dir.join("clockwork.toml"), manifest)
+        .map_err(|e| e.to_string())?;
     save(&dir, &Composition::default())?;
     Ok(dir)
 }
@@ -291,7 +292,7 @@ pub fn save(dir: &Path, composition: &Composition) -> Result<(), String> {
         "// A composition plugin, written by the Clockwork plugin editor: characters made from\n\
          // other plugins' characters, with abilities learned from any plugin. No game data.\n{body}\n"
     );
-    std::fs::write(dir.join("compose.ron"), text).map_err(|e| e.to_string())
+    clockwork_library::files::write_atomic(dir.join("compose.ron"), text).map_err(|e| e.to_string())
 }
 
 /// What the role binding menu shows for a binding.
@@ -1004,7 +1005,8 @@ fn save_recipe(state: &mut EditorState, plugin: &Plugin) -> Result<String, Strin
         .ok_or("the recipe isn't open")?;
     let graph = draft.graph.as_mut().map_err(|e| e.clone())?;
     let layout = graph.layout();
-    std::fs::write(plugin.dir.join("recipe.ron"), graph.text()).map_err(|e| e.to_string())?;
+    clockwork_library::files::write_atomic(plugin.dir.join("recipe.ron"), graph.text())
+        .map_err(|e| e.to_string())?;
     recipe_graph::save_layout(&plugin.dir, &layout)?;
     graph.mark_saved();
     draft.saved_layout = layout;

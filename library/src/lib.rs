@@ -6,6 +6,7 @@ pub mod agents;
 pub mod boxart;
 pub mod content;
 mod cue;
+pub mod files;
 pub mod store;
 
 use std::path::{Path, PathBuf};

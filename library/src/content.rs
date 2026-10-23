@@ -23,12 +23,9 @@ pub fn user_folders() -> Vec<PathBuf> {
 
 pub fn save_user_folders(folders: &[PathBuf]) -> std::io::Result<()> {
     let path = list_path().ok_or_else(|| std::io::Error::other("no data folder"))?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
     let text =
         ron::ser::to_string_pretty(folders, Default::default()).map_err(std::io::Error::other)?;
-    std::fs::write(path, text)
+    crate::files::write_atomic(&path, text)
 }
 
 /// Every content folder, in search order. New plugins go to the first.

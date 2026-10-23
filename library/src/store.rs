@@ -53,17 +53,23 @@ fn store_path() -> Option<PathBuf> {
 }
 
 pub fn load() -> Stored {
-    store_path()
-        .and_then(|path| std::fs::read_to_string(path).ok())
-        .and_then(|text| ron::from_str(&text).ok())
-        .unwrap_or_default()
+    load_reporting().0
+}
+
+/// The saved Library, and why it couldn't be read if it couldn't. An unreadable file is set
+/// aside rather than overwritten by the next save (see [`crate::files::load_ron`]).
+pub fn load_reporting() -> (Stored, Option<String>) {
+    let Some(path) = store_path() else {
+        return (Stored::default(), None);
+    };
+    match crate::files::load_ron(&path) {
+        Ok(stored) => (stored.unwrap_or_default(), None),
+        Err(problem) => (Stored::default(), Some(problem)),
+    }
 }
 
 pub fn save(stored: &Stored) -> Result<(), String> {
     let path = store_path().ok_or("no data directory for this user")?;
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    }
     let text = ron::ser::to_string_pretty(stored, Default::default()).map_err(|e| e.to_string())?;
-    std::fs::write(&path, text).map_err(|e| e.to_string())
+    crate::files::write_atomic(&path, text).map_err(|e| e.to_string())
 }
