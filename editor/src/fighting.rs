@@ -59,6 +59,9 @@ pub struct Stats {
     pub bursts: u32,
 }
 
+/// How long an item or dodge press waits for a busy action to allow a new one, in seconds.
+const PRESS_BUFFER: f32 = 0.15;
+
 /// The buttons of one frame: (pressed this frame, held) for the item buttons, pressed for dodge.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Buttons {
@@ -92,8 +95,9 @@ pub struct Fighter {
     pub plugin: Option<String>,
     /// Item pictures, by item id.
     pub icons: std::sync::Arc<Vec<(String, clockwork_core::image::RgbaImage)>>,
-    /// A press waits here until the next simulation step: dodge, then the two slots.
-    pressed: [bool; 3],
+    /// Seconds each press keeps waiting to be used: the two slots, then dodge. A press waits
+    /// for the next simulation step, and for a busy action to allow a new one.
+    pressed: [f32; 3],
     held: [bool; 2],
 }
 
@@ -124,7 +128,7 @@ impl Fighter {
             wanted_items: None,
             stats: Stats::default(),
             hits: Vec::new(),
-            pressed: [false; 3],
+            pressed: [0.0; 3],
             held: [false; 2],
         }
     }
@@ -180,11 +184,11 @@ impl Fighter {
     }
 
     pub fn press_roll(&mut self) {
-        self.pressed[2] = true;
+        self.pressed[2] = PRESS_BUFFER;
     }
 
     pub fn press(&mut self, slot: Slot) {
-        self.pressed[slot.index()] = true;
+        self.pressed[slot.index()] = PRESS_BUFFER;
     }
 
     /// Whether a slot's button is down now (called every frame).
@@ -225,16 +229,28 @@ impl Fighter {
         yaw: f32,
     ) -> Modifiers {
         let dir = facing_dir(facing, yaw);
-        if std::mem::take(&mut self.pressed[2])
-            && let Some(dodge) = self.moves.dodge.clone()
-        {
-            self.runner
-                .start(&self.moves, &dodge, Source::Dodge, facing, dir);
+        // A press made while an action can't be interrupted waits a moment for it to end.
+        if self.pressed[2] > 0.0 {
+            let waiting = match self.moves.dodge.clone() {
+                Some(dodge) if self.runner.can_start(&self.moves) => {
+                    self.runner
+                        .start(&self.moves, &dodge, Source::Dodge, facing, dir);
+                    false
+                }
+                Some(_) => true,
+                None => false,
+            };
+            if !waiting {
+                self.pressed[2] = 0.0;
+            }
         }
         for slot in [Slot::B, Slot::A] {
-            if std::mem::take(&mut self.pressed[slot.index()]) {
-                self.use_slot(slot, facing, dir);
+            if self.pressed[slot.index()] > 0.0 && self.use_slot(slot, facing, dir) {
+                self.pressed[slot.index()] = 0.0;
             }
+        }
+        for left in &mut self.pressed {
+            *left = (*left - dt).max(0.0);
         }
 
         let held = self.held;
@@ -349,19 +365,24 @@ impl Fighter {
 
     /// Uses the item on a button if it can be used: owned, enough ammunition, nothing busy
     /// and none of its projectiles at their limit.
-    fn use_slot(&mut self, slot: Slot, facing: Direction4, dir: Vec2) {
+    /// Uses the item in `slot` if it can be. Returns false while the press should keep
+    /// waiting (an action that can't be interrupted yet), true once it's settled either way.
+    fn use_slot(&mut self, slot: Slot, facing: Direction4, dir: Vec2) -> bool {
+        if !self.runner.can_start(&self.moves) {
+            return false;
+        }
         let Some(inventory) = &mut self.inventory else {
-            return;
+            return true;
         };
         let Some(item) = inventory.equipped(slot).cloned() else {
-            return;
+            return true;
         };
         let Some(action) = item
             .action
             .as_deref()
             .and_then(|id| self.moves.actions.iter().find(|a| a.id == id))
         else {
-            return;
+            return true;
         };
         let at_limit = action.spawns.iter().any(|spawn| {
             self.moves
@@ -371,8 +392,8 @@ impl Fighter {
                 .and_then(|p| p.limit.map(|limit| (p, limit)))
                 .is_some_and(|(p, limit)| self.projectiles.count(&p.id) >= limit as usize)
         });
-        if at_limit || !inventory.can_use(&item.id) || !self.runner.can_start(&self.moves) {
-            return;
+        if at_limit || !inventory.can_use(&item.id) {
+            return true;
         }
         if self
             .runner
@@ -380,6 +401,7 @@ impl Fighter {
         {
             inventory.spend(&item.id);
         }
+        true
     }
 
     /// What the HUD draws now.
@@ -503,5 +525,84 @@ pub fn gizmo_system(session: Res<crate::play::PlaySession>, mut gizmos: Gizmos) 
             .unwrap_or(Color::WHITE);
         let position = Vec3::new(p.position.x, p.height + 0.3, p.position.y);
         gizmos.sphere(Isometry3d::from_translation(position), 0.25, color);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clockwork_core::action::{Action, Motion};
+    use clockwork_core::character2d::{AnimationRef, Directional};
+    use clockwork_runtime::controller::Ground;
+
+    struct Flat;
+    impl World for Flat {
+        fn ground(&self, _: f32, _: f32) -> Ground {
+            Ground::Floor(0.0)
+        }
+    }
+
+    fn rolling() -> Fighter {
+        let one = AnimationRef {
+            name: "roll".into(),
+            flip_x: false,
+            flip_y: false,
+        };
+        let roll = Action {
+            id: "roll".into(),
+            animation: Directional {
+                north: one.clone(),
+                east: one.clone(),
+                south: one.clone(),
+                west: one,
+            },
+            duration: 0.3,
+            motion: Motion::Rooted,
+            hits: vec![],
+            invulnerable: None,
+            spawns: vec![],
+            hold: None,
+            cancel_from: None,
+            attachments: vec![],
+        };
+        Fighter::new(
+            None,
+            Moves {
+                actions: vec![roll],
+                projectiles: vec![],
+                dodge: Some("roll".into()),
+            },
+        )
+    }
+
+    /// Steps `seconds` in 10 ms steps.
+    fn run(fighter: &mut Fighter, seconds: f32) {
+        for _ in 0..(seconds / 0.01).round() as usize {
+            fighter.step(&Flat, 0.01, Vec3::ZERO, Direction4::South, false, 0.0);
+        }
+    }
+
+    #[test]
+    fn a_press_just_before_an_action_ends_starts_the_next() {
+        let mut fighter = rolling();
+        fighter.press_roll();
+        run(&mut fighter, 0.2);
+        assert_eq!(fighter.runner.current(&fighter.moves), Some("roll"));
+        // Pressed 0.1 s before the roll ends: it waits, then rolls again.
+        fighter.press_roll();
+        run(&mut fighter, 0.15);
+        assert_eq!(fighter.runner.current(&fighter.moves), Some("roll"));
+        run(&mut fighter, 0.3);
+        assert_eq!(fighter.runner.current(&fighter.moves), None);
+    }
+
+    #[test]
+    fn a_press_long_before_an_action_ends_is_dropped() {
+        let mut fighter = rolling();
+        fighter.press_roll();
+        run(&mut fighter, 0.01);
+        fighter.press_roll();
+        run(&mut fighter, 0.35);
+        assert_eq!(fighter.runner.current(&fighter.moves), None);
     }
 }

@@ -42,6 +42,8 @@ use crate::{
 
 /// The simulation steps at a fixed rate, so movement doesn't depend on the frame rate.
 const STEP: f32 = 1.0 / 60.0;
+/// How long a jump press is remembered while it can't be used yet, in seconds.
+const JUMP_BUFFER: f32 = 0.15;
 
 /// The camera looks at this point above the character's feet.
 const CAMERA_HEIGHT: f32 = 0.8;
@@ -140,9 +142,10 @@ enum PlayedBody {
 struct ModelBody {
     body: Body,
     character: Character,
-    /// A jump press waiting for the next simulation step. Frames often render without a
-    /// step (the display is faster than the simulation), and a press must not be lost then.
-    jump_pending: bool,
+    /// Seconds a jump press stays waiting to be used. Frames often render without a step (the
+    /// display is faster than the simulation), and a press made a moment too early (in the
+    /// air just before landing, or as an attack ends) should still jump.
+    jump_buffer: f32,
     /// The bone the character leans with.
     lean_bone: Option<usize>,
     /// The action shown last, so a new one starts its animation from the beginning.
@@ -284,11 +287,17 @@ impl PlayedBody {
                 let step_input = Input {
                     direction: steer,
                     walk: input.walk,
-                    jump_pressed: m.jump_pending && !busy,
+                    jump_pressed: m.jump_buffer > 0.0 && !busy,
                     jump_held: (input.held || input.jump) && !busy,
                 };
-                m.jump_pending = false;
-                controller::step(&mut m.body, &step_input, &m.character.movement, world, STEP);
+                let jumped =
+                    controller::step(&mut m.body, &step_input, &m.character.movement, world, STEP);
+                // A press waits out a busy action or the end of a fall, but not forever.
+                m.jump_buffer = if jumped {
+                    0.0
+                } else {
+                    (m.jump_buffer - STEP).max(0.0)
+                };
             }
         }
     }
@@ -804,7 +813,9 @@ pub fn play_system(
 
     // Every kind alike: the buttons, the steps, the scene's behaviors and what they did.
     if let PlayedBody::Model(m) = &mut played.body {
-        m.jump_pending |= jump;
+        if jump {
+            m.jump_buffer = JUMP_BUFFER;
+        }
     }
     played.fighter.feed(&buttons, &requests);
     played.leftover += sim_dt;
@@ -1279,7 +1290,7 @@ fn start(
                 PlayedBody::Model(Box::new(ModelBody {
                     body: Body::new(position, yaw),
                     character: character.clone(),
-                    jump_pending: false,
+                    jump_buffer: 0.0,
                     lean_bone,
                     last_action: None,
                     camera: follow,
