@@ -51,14 +51,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn serve_http(addr: &str, presence: Presence) -> Result<(), Box<dyn std::error::Error>> {
+    // One Library for every session: loading it reads and hashes every ROM.
+    let workspace = Clockwork::load_workspace();
     let service = StreamableHttpService::new(
-        move || Ok(Clockwork::new().with_presence(presence.clone())),
+        move || Ok(Clockwork::with_workspace(workspace.clone()).with_presence(presence.clone())),
         Arc::new(LocalSessionManager::default()),
         StreamableHttpServerConfig::default(),
     );
     let app = axum::Router::new().route_service("/mcp", service);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     println!("clockwork-mcp serving streamable HTTP at http://{addr}/mcp");
+    if listener.local_addr().is_ok_and(|a| !a.ip().is_loopback()) {
+        // rmcp only answers requests whose Host is localhost or a loopback address (against
+        // DNS rebinding), so other machines can't use the server even on a public address.
+        eprintln!(
+            "note: only requests addressed to localhost are answered; \
+             this server has no authentication, so it is not opened to other machines"
+        );
+    }
     axum::serve(listener, app).await?;
     Ok(())
 }

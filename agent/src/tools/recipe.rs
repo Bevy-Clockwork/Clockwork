@@ -485,6 +485,14 @@ pub fn find_plugin(name: &str) -> Result<Plugin, String> {
         .ok_or_else(|| format!("No plugin named \"{name}\"; see list_plugins"))
 }
 
+/// Whether `id` is a safe plugin or game id: a folder name on every system, never a path.
+fn valid_id(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+}
+
 /// Writes a verified plugin folder and returns its path.
 pub fn save(
     name: &str,
@@ -494,12 +502,7 @@ pub fn save(
     recipe_text: &str,
     overwrite: bool,
 ) -> Result<PathBuf, String> {
-    let valid = |s: &str| {
-        !s.is_empty()
-            && s.chars()
-                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
-    };
-    if !valid(name) || !valid(game_id) {
+    if !valid_id(name) || !valid_id(game_id) {
         return Err("name and game_id may only use a-z, 0-9, '-' and '_'".into());
     }
     let dir = plugin_dirs()
@@ -533,4 +536,26 @@ pub fn save(
     clockwork_library::files::write_atomic(dir.join("recipe.ron"), recipe_text)
         .map_err(|e| e.to_string())?;
     Ok(dir)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plugin_ids_are_plain_folder_names() {
+        assert!(valid_id("minish-cap_link2"));
+        for bad in [
+            "",
+            "Link",
+            "../escape",
+            "a/b",
+            "a\\b",
+            "c:",
+            "dot.ted",
+            "space d",
+        ] {
+            assert!(!valid_id(bad), "{bad}");
+        }
+    }
 }

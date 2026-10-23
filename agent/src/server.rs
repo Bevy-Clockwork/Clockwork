@@ -23,6 +23,19 @@ use crate::{external, guide, presence::Presence, workspace::Workspace};
 
 type ToolResult = Result<CallToolResult, McpError>;
 
+/// Runs slow file work (reading a ROM, hashing the Library, searching a decomp) without
+/// stalling the runtime's other tasks: other sessions and their keep-alives. On a
+/// single-threaded runtime, where that isn't possible, it just runs.
+fn blocking<T>(work: impl FnOnce() -> T) -> T {
+    use tokio::runtime::{Handle, RuntimeFlavor};
+    match Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(work)
+        }
+        _ => work(),
+    }
+}
+
 fn reply(result: Result<String, String>) -> ToolResult {
     Ok(match result {
         Ok(text) => CallToolResult::success(vec![ContentBlock::text(text)]),
@@ -207,8 +220,18 @@ impl Default for Clockwork {
 
 impl Clockwork {
     pub fn new() -> Self {
+        Self::with_workspace(Self::load_workspace())
+    }
+
+    /// Loads the Library once, to share between servers (one per HTTP session).
+    pub fn load_workspace() -> Arc<Mutex<Workspace>> {
+        Arc::new(Mutex::new(blocking(Workspace::load)))
+    }
+
+    /// A server working on a shared Library, so new sessions don't re-read every ROM.
+    pub fn with_workspace(workspace: Arc<Mutex<Workspace>>) -> Self {
         Self {
-            workspace: Arc::new(Mutex::new(Workspace::load())),
+            workspace,
             tool_router: Self::tool_router(),
             presence: None,
         }
@@ -244,9 +267,11 @@ impl Clockwork {
     }
 
     fn rom_of(&self, game: &str) -> Result<Arc<Vec<u8>>, String> {
-        let mut ws = self.workspace();
-        let entry = ws.find(game)?;
-        ws.rom(&entry)
+        blocking(|| {
+            let mut ws = self.workspace();
+            let entry = ws.find(game)?;
+            ws.rom(&entry)
+        })
     }
 }
 
@@ -259,7 +284,7 @@ impl Clockwork {
     async fn list_games(&self) -> ToolResult {
         self.track("list_games");
         let mut ws = self.workspace();
-        *ws = Workspace::load();
+        *ws = blocking(Workspace::load);
         let mut text = serde_json::to_string_pretty(&ws.games()).unwrap_or_default();
         if !ws.problems.is_empty() {
             let _ = write!(text, "\nCould not load: {}", ws.problems.join("; "));
@@ -396,12 +421,14 @@ impl Clockwork {
         self.track("decomp_search");
         let a = args.0;
         reply(self.decomp_root(&a.game).and_then(|root| {
-            decomp::search(
-                &root,
-                &a.pattern,
-                a.path_filter.as_deref().unwrap_or(""),
-                a.max_results.unwrap_or(60),
-            )
+            blocking(|| {
+                decomp::search(
+                    &root,
+                    &a.pattern,
+                    a.path_filter.as_deref().unwrap_or(""),
+                    a.max_results.unwrap_or(60),
+                )
+            })
         }))
     }
 
@@ -643,5 +670,22 @@ mod tests {
             serde_json::from_str(r#"{"game": "x", "offset": "0x10", "length": 64}"#).unwrap();
         assert_eq!(args.offset.value(), Ok(16));
         assert_eq!(args.length.unwrap().value(), Ok(64));
+        assert_eq!(number(" 0X1_000 "), Ok(0x1000));
+        assert!(number("").is_err());
+        assert!(number("-1").is_err());
+    }
+
+    #[test]
+    fn blocking_work_runs_on_any_runtime() {
+        assert_eq!(blocking(|| 1), 1);
+        let single = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        assert_eq!(single.block_on(async { blocking(|| 2) }), 2);
+        let multi = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .build()
+            .unwrap();
+        assert_eq!(multi.block_on(async { blocking(|| 3) }), 3);
     }
 }
