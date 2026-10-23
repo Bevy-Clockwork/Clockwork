@@ -12,7 +12,8 @@ static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 /// Writes `contents` to `path` through a temporary file in the same folder and a rename, so
 /// readers (and a crash mid-write) see either the old file or the new one, never a mix.
 /// Creates the parent folder if needed.
-pub fn write_atomic(path: &Path, contents: impl AsRef<[u8]>) -> std::io::Result<()> {
+pub fn write_atomic(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> std::io::Result<()> {
+    let path = path.as_ref();
     let dir = match path.parent() {
         Some(dir) if !dir.as_os_str().is_empty() => dir,
         _ => Path::new("."),
