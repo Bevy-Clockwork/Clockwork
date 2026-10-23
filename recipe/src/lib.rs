@@ -59,6 +59,13 @@ pub enum RecipeError {
         bone: String,
         parent: String,
     },
+    #[error("step {step}: {what} of {size} is over the limit of {max}")]
+    TooLarge {
+        step: usize,
+        what: &'static str,
+        size: u64,
+        max: u64,
+    },
     #[error("output \"{0}\": unknown image")]
     UnknownOutput(String),
     #[error("output \"{id}\": {message}")]
@@ -85,6 +92,7 @@ impl RecipeError {
         match self {
             RecipeError::OutOfRange { step, .. }
             | RecipeError::MissingSize { step }
+            | RecipeError::TooLarge { step, .. }
             | RecipeError::Lz77 { step, .. }
             | RecipeError::Unknown { step, .. }
             | RecipeError::LookupOutOfRange { step, .. }
@@ -268,6 +276,24 @@ impl Made<'_> {
 }
 
 /// Runs a recipe on its own: the parts its characters name must be built in or written in place.
+/// The largest buffer a `Fill` step makes, in bytes. Plugins are shared, so a recipe's numbers
+/// are checked before memory is set aside for them.
+pub const MAX_FILL: u64 = 64 * 1024 * 1024;
+/// The most pixels a `Canvas` step makes (4096 x 4096).
+pub const MAX_CANVAS_PIXELS: u64 = 4096 * 4096;
+
+fn within(step: usize, what: &'static str, size: u64, max: u64) -> Result<(), RecipeError> {
+    if size > max {
+        return Err(RecipeError::TooLarge {
+            step,
+            what,
+            size,
+            max,
+        });
+    }
+    Ok(())
+}
+
 pub fn run(recipe: &Recipe, rom: &[u8]) -> Result<Extracted, RecipeError> {
     run_in(recipe, rom, &asset::Builtins)
 }
@@ -339,6 +365,7 @@ pub fn run_observed(
                 buffers.insert(name, bytes);
             }
             Step::Fill { name, size, value } => {
+                within(step, "a filled buffer", u64::from(*size), MAX_FILL)?;
                 buffers.insert(name, vec![*value; *size as usize]);
             }
             Step::Literal { name, hex } => {
@@ -375,6 +402,8 @@ pub fn run_observed(
                 width,
                 height,
             } => {
+                let pixels = u64::from(*width) * u64::from(*height);
+                within(step, "a canvas", pixels, MAX_CANVAS_PIXELS)?;
                 images.insert(name, RgbaImage::new(*width, *height));
             }
             Step::Paste { from, into, at } => {
@@ -1640,6 +1669,43 @@ mod tests {
         let (_, replaced) = &out.images[2];
         assert_eq!(replaced.get(0, 0)[3], 0);
         assert_eq!(replaced.get(8, 0), [255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn refuses_oversized_buffers_and_canvases() {
+        let fill = Recipe {
+            steps: vec![Step::Fill {
+                name: "x".into(),
+                size: u32::MAX,
+                value: 0,
+            }],
+            outputs: vec![],
+        };
+        assert!(matches!(
+            run(&fill, &[]),
+            Err(RecipeError::TooLarge { step: 0, .. })
+        ));
+        let canvas = Recipe {
+            steps: vec![Step::Canvas {
+                name: "x".into(),
+                width: 65536,
+                height: 65536,
+            }],
+            outputs: vec![],
+        };
+        assert!(matches!(
+            run(&canvas, &[]),
+            Err(RecipeError::TooLarge { step: 0, .. })
+        ));
+        let fits = Recipe {
+            steps: vec![Step::Canvas {
+                name: "x".into(),
+                width: 4096,
+                height: 4096,
+            }],
+            outputs: vec![],
+        };
+        assert!(run(&fits, &[]).is_ok());
     }
 
     #[test]
