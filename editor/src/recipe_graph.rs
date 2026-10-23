@@ -134,6 +134,11 @@ struct Resolution {
     wires: Vec<((RNode, usize), (RNode, usize))>,
     /// Inputs that need something no earlier step makes.
     missing: HashSet<(RNode, usize)>,
+    /// What feeds each wired input, so drawing a pin doesn't search every wire.
+    source: HashMap<(RNode, usize), (RNode, usize)>,
+    /// The nodes wired into each node, and those each node is wired into.
+    upstream: HashMap<RNode, Vec<RNode>>,
+    downstream: HashMap<RNode, Vec<RNode>>,
 }
 
 fn resolve(recipe: &Recipe, ports: &HashMap<RNode, Vec<OwnedPort>>) -> Resolution {
@@ -149,7 +154,12 @@ fn resolve(recipe: &Recipe, ports: &HashMap<RNode, Vec<OwnedPort>>) -> Resolutio
                 continue;
             }
             match latest.get(&(port.kind, port.name.as_str())) {
-                Some(from) => resolution.wires.push((*from, (node, i))),
+                Some(from) => {
+                    resolution.wires.push((*from, (node, i)));
+                    resolution.source.insert((node, i), *from);
+                    resolution.upstream.entry(node).or_default().push(from.0);
+                    resolution.downstream.entry(from.0).or_default().push(node);
+                }
                 None if port.access != Access::Grow => {
                     resolution.missing.insert((node, i));
                 }
@@ -2216,12 +2226,11 @@ fn guess_type(text: &str) -> FieldType {
 /// `node`, everything it is made from and everything made from it.
 fn lineage(resolution: &Resolution, node: RNode) -> HashSet<RNode> {
     let mut set = HashSet::from([node]);
-    for upstream in [true, false] {
+    for links in [&resolution.upstream, &resolution.downstream] {
         let mut stack = vec![node];
         while let Some(at) = stack.pop() {
-            for ((from, _), (to, _)) in &resolution.wires {
-                let (here, next) = if upstream { (to, from) } else { (from, to) };
-                if *here == at && set.insert(*next) {
+            for next in links.get(&at).into_iter().flatten() {
+                if set.insert(*next) {
                     stack.push(*next);
                 }
             }
@@ -2819,10 +2828,12 @@ impl SnarlViewer<RNode> for Viewer<'_> {
             } else {
                 format!("A {}. Click to pick another.", kind.label())
             });
-        let names = candidates(self.ports, self.steps, node, kind);
+        let (ports, steps) = (self.ports, self.steps);
         egui::Popup::menu(&response)
             .id(egui::Id::new(("pick input", node_key(node), i)))
             .show(|ui| {
+                // Only while the menu is open: it looks through every earlier step.
+                let names = candidates(ports, steps, node, kind);
                 ui.label(kit::dim(format!("{label} reads")));
                 if let Some(name) = name_menu(ui, &names, &current, kind) {
                     self.changes.push(Change::Rename {
@@ -2839,9 +2850,9 @@ impl SnarlViewer<RNode> for Viewer<'_> {
         let lit = self.lit(node)
             && self
                 .resolution
-                .wires
-                .iter()
-                .any(|(from, to)| *to == (node, i) && self.lit(from.0));
+                .source
+                .get(&(node, i))
+                .is_some_and(|from| self.lit(from.0));
         PinInfo::circle().with_fill(fill).with_wire_color(if lit {
             kind_color(kind)
         } else {
@@ -3478,5 +3489,44 @@ Recipe(
         let places = remap(places, |n| Some(shifted(n, RNode::Step(0))));
         assert_eq!(places[&RNode::Step(2)], (Pos2::ZERO, false));
         assert!(places.contains_key(&RNode::Output(0)));
+    }
+
+    #[test]
+    fn wires_are_looked_up_by_input_and_lineage_follows_them() {
+        let graph = graph();
+        let resolution = &graph.resolution;
+        assert_eq!(resolution.source.len(), resolution.wires.len());
+        for (from, to) in &resolution.wires {
+            assert_eq!(resolution.source.get(to), Some(from));
+            assert!(resolution.upstream[&to.0].contains(&from.0));
+            assert!(resolution.downstream[&from.0].contains(&to.0));
+        }
+        // A node's lineage is what feeds it, what it feeds, and nothing else.
+        let ((from, _), (to, _)) = resolution.wires[0];
+        let lineage = lineage(resolution, to);
+        assert!(lineage.contains(&from) && lineage.contains(&to));
+        for node in &lineage {
+            assert!(
+                *node == to
+                    || lineage_reaches(resolution, *node, to)
+                    || lineage_reaches(resolution, to, *node)
+            );
+        }
+    }
+
+    fn lineage_reaches(resolution: &Resolution, from: RNode, to: RNode) -> bool {
+        let mut stack = vec![from];
+        let mut seen = HashSet::new();
+        while let Some(at) = stack.pop() {
+            if at == to {
+                return true;
+            }
+            for ((a, _), (b, _)) in &resolution.wires {
+                if *a == at && seen.insert(*b) {
+                    stack.push(*b);
+                }
+            }
+        }
+        false
     }
 }
