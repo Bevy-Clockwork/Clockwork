@@ -18,8 +18,9 @@ const TEXT_EXTENSIONS: &[&str] = &[
 
 /// Where a repository's clone lives.
 pub fn local_path(url: &str) -> PathBuf {
+    let url = url.trim_end_matches('/');
+    let url = url.strip_suffix(".git").unwrap_or(url);
     let name: String = url
-        .trim_end_matches('/')
         .rsplit('/')
         .take(2)
         .collect::<Vec<_>>()
@@ -53,7 +54,8 @@ pub fn sync(url: &str) -> Result<String, String> {
     } else {
         std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
         Command::new(&git)
-            .args(["clone", "--depth", "1", url])
+            // `--` keeps a URL that starts with '-' from being read as an option.
+            .args(["clone", "--depth", "1", "--", url])
             .arg(&path)
             .output()
     }
@@ -215,6 +217,13 @@ mod tests {
     fn clone_folder_names() {
         let path = local_path("https://github.com/team/game");
         assert!(path.ends_with("decomps/team__game") || path.ends_with("decomps\\team__game"));
+        // The same repository, however its URL is written, shares one clone.
+        for same in [
+            "https://github.com/team/game.git",
+            "https://github.com/team/game/",
+        ] {
+            assert_eq!(local_path(same).file_name(), path.file_name(), "{same}");
+        }
     }
 
     #[test]
