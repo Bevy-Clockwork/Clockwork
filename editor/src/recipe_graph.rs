@@ -66,6 +66,7 @@ fn kind_color(kind: NameKind) -> Color32 {
         NameKind::Model => Color32::from_rgb(0xD8, 0x8A, 0x50),
         NameKind::Collision => Color32::from_rgb(0xC0, 0x60, 0x58),
         NameKind::Sprite => Color32::from_rgb(0x8C, 0xC0, 0x70),
+        NameKind::Places => Color32::from_rgb(0xD0, 0xC0, 0x60),
     }
 }
 

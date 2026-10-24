@@ -125,6 +125,21 @@ pub fn summary(extracted: &Extracted) -> String {
             out.push_str(&terrain_summary(&m.id, terrain));
         }
     }
+    for (id, scene) in &extracted.scenes {
+        let doors = scene.nodes.iter().filter(|n| n.door.is_some()).count();
+        let shown = scene.nodes.iter().filter(|n| n.item.is_some()).count();
+        let groups: std::collections::BTreeSet<_> = scene
+            .nodes
+            .iter()
+            .filter_map(|n| n.group.as_ref())
+            .collect();
+        let _ = writeln!(
+            out,
+            "scene \"{id}\": {} nodes ({shown} show an output, {doors} doors) in {} groups",
+            scene.nodes.len(),
+            groups.len()
+        );
+    }
     for (id, items) in &extracted.items {
         let names: Vec<String> = items
             .iter()
@@ -377,7 +392,26 @@ pub fn previews(
             let shown = preview::fit(&preview::on_checkerboard(image), PREVIEW_SIZE);
             Ok((format!("Preview of \"{id}\""), png(&shown)?))
         });
-        return models.chain(sprites).chain(images).take(4).collect();
+        let scenes = extracted.scenes.iter().map(|(id, scene)| {
+            let image = |output: &str| {
+                extracted
+                    .images
+                    .iter()
+                    .find(|(i, _)| i == output)
+                    .map(|(_, image)| image)
+            };
+            let map = preview::scene_map(scene, image, 16.0, PREVIEW_SIZE);
+            Ok((
+                format!("Scene \"{id}\": its images where they stand, other nodes as dots"),
+                png(&preview::on_checkerboard(&map))?,
+            ))
+        });
+        return models
+            .chain(sprites)
+            .chain(scenes)
+            .chain(images)
+            .take(4)
+            .collect();
     }
 
     // Pick the surface map, and the image it covers (or the zoomed image).
@@ -399,11 +433,24 @@ pub fn previews(
     };
     let image_id = match (&zoom, map) {
         (Some(z), _) => Some(z.image.to_string()),
-        (None, Some(m)) => extracted
-            .images
-            .iter()
-            .find(|(_, i)| i.width == m.width * m.cell_size && i.height == m.height * m.cell_size)
-            .map(|(id, _)| id.clone()),
+        // The image the map names, else one of its size.
+        (None, Some(m)) => {
+            let named = extracted.surfaces.iter().find_map(|(id, map)| {
+                std::ptr::eq(map, m)
+                    .then(|| extracted.surface_images.iter().find(|(s, _)| s == id))
+                    .flatten()
+                    .map(|(_, image)| image.clone())
+            });
+            named.or_else(|| {
+                extracted
+                    .images
+                    .iter()
+                    .find(|(_, i)| {
+                        i.width == m.width * m.cell_size && i.height == m.height * m.cell_size
+                    })
+                    .map(|(id, _)| id.clone())
+            })
+        }
         (None, None) => None,
     };
     let mut label = String::new();

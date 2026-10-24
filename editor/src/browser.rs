@@ -545,6 +545,20 @@ fn generate(extracted: &Extracted, key: &str) -> Vec<(String, RgbaImage)> {
             frame.map_or_else(|| RgbaImage::new(1, 1), |f| f.image),
         )
     });
+    // A scene is shown as a map of what it places.
+    let scenes = extracted.scenes.iter().map(|(id, scene)| {
+        let image = |output: &str| {
+            extracted
+                .images
+                .iter()
+                .find(|(i, _)| i == output)
+                .map(|(_, image)| image)
+        };
+        (
+            id.clone(),
+            preview::scene_map(scene, image, 16.0, PREVIEW_MAX),
+        )
+    });
     let mut previews = Vec::new();
     for (id, image) in extracted
         .images
@@ -552,6 +566,7 @@ fn generate(extracted: &Extracted, key: &str) -> Vec<(String, RgbaImage)> {
         .cloned()
         .chain(models.collect::<Vec<_>>())
         .chain(sprites.collect::<Vec<_>>())
+        .chain(scenes.collect::<Vec<_>>())
     {
         let small = if image.width.max(image.height) > PREVIEW_MAX {
             preview::fit(&image, PREVIEW_MAX)
@@ -579,7 +594,13 @@ fn generate(extracted: &Extracted, key: &str) -> Vec<(String, RgbaImage)> {
 pub const KIND_GROUPS: &[(&str, &[Kind])] = &[
     (
         "World",
-        &[Kind::Area, Kind::Tileset, Kind::Object, Kind::Camera],
+        &[
+            Kind::Scene,
+            Kind::Area,
+            Kind::Tileset,
+            Kind::Object,
+            Kind::Camera,
+        ],
     ),
     (
         "Characters",
@@ -632,6 +653,7 @@ pub fn kind_icon(kind: Option<Kind>) -> &'static str {
         Some(Kind::Rules) => "⚖",
         Some(Kind::Flow) => "⇄",
         Some(Kind::Audio) => "♪",
+        Some(Kind::Scene) => "⌂",
         None => "◇",
     }
 }

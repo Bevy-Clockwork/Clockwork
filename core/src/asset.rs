@@ -182,6 +182,13 @@ pub static KINDS: &[AssetKind] = &[
         builtins: no_builtins,
     },
     AssetKind {
+        name: "Scene",
+        category: Some(Kind::Scene),
+        placeable: true,
+        uses: no_uses,
+        builtins: no_builtins,
+    },
+    AssetKind {
         name: "Model",
         category: None,
         placeable: true,

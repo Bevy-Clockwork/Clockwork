@@ -20,6 +20,7 @@ use clockwork_core::asset::{self, AssetSource};
 use clockwork_core::image::RgbaImage;
 use clockwork_core::manifest::{ManifestError, PluginManifest};
 use clockwork_core::model::Model;
+use clockwork_core::place::{self, Placement, SceneTemplate};
 use clockwork_core::recipe::{Codec, Output, Recipe, Rect, Step, parse_hex};
 use clockwork_core::sprite::Sprite;
 use clockwork_core::surface::{CodeMeaning, SurfaceError, SurfaceMap};
@@ -139,6 +140,10 @@ pub struct Extracted {
     pub sounds: Vec<(String, clockwork_core::sound::Pcm)>,
     /// Output dialogs whose pages come from extracted text, by id.
     pub dialogs: Vec<(String, clockwork_core::ui::Dialog)>,
+    /// Output scenes by id: nodes to add to the Workshop's scene.
+    pub scenes: Vec<(String, SceneTemplate)>,
+    /// The image each surface map says it covers: (surface map id, image id).
+    pub surface_images: Vec<(String, String)>,
 }
 
 /// Text from `bytes` starting at `at` up to the `end` byte (or `length` bytes): each byte the
@@ -250,6 +255,7 @@ pub struct Made {
     models: HashMap<String, Model>,
     collisions: HashMap<String, Collision>,
     sprites: HashMap<String, Sprite>,
+    places: HashMap<String, Vec<Placement>>,
 }
 
 impl Made {
@@ -275,6 +281,10 @@ impl Made {
 
     pub fn sprite(&self, name: &str) -> Option<&Sprite> {
         self.sprites.get(name)
+    }
+
+    pub fn places(&self, name: &str) -> Option<&[Placement]> {
+        self.places.get(name).map(Vec::as_slice)
     }
 
     /// About how much memory its buffers and images take, in bytes, to decide whether keeping
@@ -358,6 +368,7 @@ fn run_step(step: usize, s: &Step, rom: &[u8], made: &mut Made) -> Result<(), Re
         models,
         collisions,
         sprites,
+        places,
     } = made;
     {
         let unknown = |kind, name: &str| RecipeError::Unknown {
@@ -524,6 +535,7 @@ fn run_step(step: usize, s: &Step, rom: &[u8], made: &mut Made) -> Result<(), Re
                 bank,
                 columns,
                 into,
+                depth,
             } => {
                 let tiles = buffers
                     .get(tiles.as_str())
@@ -535,7 +547,10 @@ fn run_step(step: usize, s: &Step, rom: &[u8], made: &mut Made) -> Result<(), Re
                 let bank = banks
                     .get(bank.as_str())
                     .ok_or_else(|| unknown("palette bank", bank))?;
-                images.insert(into.clone(), render_metatiles(tiles, meta, bank, *columns));
+                images.insert(
+                    into.clone(),
+                    render_metatiles(tiles, meta, bank, *columns, *depth),
+                );
             }
             Step::GbaMetatileMap {
                 tiles,
@@ -545,6 +560,7 @@ fn run_step(step: usize, s: &Step, rom: &[u8], made: &mut Made) -> Result<(), Re
                 width,
                 bank,
                 into,
+                depth,
             } => {
                 let tiles = buffers
                     .get(tiles.as_str())
@@ -561,7 +577,7 @@ fn run_step(step: usize, s: &Step, rom: &[u8], made: &mut Made) -> Result<(), Re
                     .ok_or_else(|| unknown("palette bank", bank))?;
                 images.insert(
                     into.clone(),
-                    render_metatile_map(tiles, meta, map, *width, bank),
+                    render_metatile_map(tiles, meta, map, *width, bank, *depth),
                 );
             }
             Step::Lookup {
@@ -591,6 +607,124 @@ fn run_step(step: usize, s: &Step, rom: &[u8], made: &mut Made) -> Result<(), Re
                     value.write(&mut out, v);
                 }
                 buffers.insert(into.clone(), out);
+            }
+            Step::Places {
+                from,
+                at,
+                stride,
+                count,
+                until,
+                when,
+                x,
+                y,
+                size,
+                origin,
+                item,
+                name,
+                group,
+                door,
+                animation,
+                code,
+                extent,
+                into,
+            } => {
+                let bytes = buffers
+                    .get(from.as_str())
+                    .ok_or_else(|| unknown("buffer", from))?;
+                let short = |what: &str, index: usize| RecipeError::Decode {
+                    step,
+                    message: format!("record {index} of \"{from}\" is too short for its {what}"),
+                };
+                if count.is_none() && until.is_none() {
+                    return Err(RecipeError::Decode {
+                        step,
+                        message: "a Places step needs a count or an until".into(),
+                    });
+                }
+                let limit = count.map_or(usize::MAX, |n| n as usize);
+                let list = places.entry(into.clone()).or_default();
+                let mut index = 0;
+                while index < limit {
+                    let start = *at as usize + index * (*stride).max(1) as usize;
+                    let Some(record) = bytes.get(start..start + (*stride).max(1) as usize) else {
+                        if until.is_some() && count.is_none() {
+                            return Err(RecipeError::Decode {
+                                step,
+                                message: format!(
+                                    "the records of \"{from}\" end before one matches until"
+                                ),
+                            });
+                        }
+                        return Err(short("record", index));
+                    };
+                    if until.as_ref().is_some_and(|u| u.holds(record)) {
+                        break;
+                    }
+                    if when.iter().all(|m| m.holds(record)) {
+                        let mut px = x.read(record).ok_or_else(|| short("x", index))? as f32;
+                        let mut py = y.read(record).ok_or_else(|| short("y", index))? as f32;
+                        if let Some((w, h)) = size {
+                            px += w.read(record).ok_or_else(|| short("width", index))? as f32 / 2.0;
+                            py +=
+                                h.read(record).ok_or_else(|| short("height", index))? as f32 / 2.0;
+                        }
+                        let shown = item.as_ref().and_then(|i| i.pick(record, index));
+                        let fill = |t: &clockwork_core::place::Template| {
+                            t.fill(record, shown, index)
+                                .ok_or_else(|| short("name", index))
+                        };
+                        let half = extent.as_ref().map_or(Ok((0, 0)), |e| {
+                            e.by.read(record)
+                                .map(|v| e.sizes.get(&v).copied().unwrap_or(e.other))
+                                .ok_or_else(|| short("extent", index))
+                        })?;
+                        list.push(Placement {
+                            name: fill(name)?,
+                            group: group.as_deref().map(fill).transpose()?,
+                            item: shown.map(str::to_string),
+                            x: px + origin.0 as f32,
+                            y: py + origin.1 as f32,
+                            door: door
+                                .as_ref()
+                                .map(|d| {
+                                    Ok::<_, RecipeError>(place::Door {
+                                        to: fill(&d.to)?,
+                                        radius: d.radius,
+                                        fade: d.fade,
+                                    })
+                                })
+                                .transpose()?,
+                            animation: animation.as_deref().map(fill).transpose()?,
+                            code: match code {
+                                Some(field) => {
+                                    field.read(record).ok_or_else(|| short("code", index))?
+                                }
+                                None => index as i64 + 1,
+                            },
+                            half,
+                        });
+                    }
+                    index += 1;
+                }
+            }
+            Step::MarkPlaces {
+                from,
+                width,
+                height,
+                cell_size,
+                origin,
+                into,
+            } => {
+                let list = places
+                    .get(from.as_str())
+                    .ok_or_else(|| unknown("placement list", from))?;
+                let cells = *width as u64 * *height as u64;
+                within(step, "a grid", cells, MAX_FILL)?;
+                let grid = buffers.entry(into.clone()).or_default();
+                if (grid.len() as u64) < cells {
+                    grid.resize(cells as usize, 0);
+                }
+                place::mark(grid, list, (*width, *height), *cell_size, *origin);
             }
             Step::Overlay {
                 from,
@@ -777,7 +911,11 @@ fn outputs(
                 cell_size,
                 grids,
                 extensions,
+                image,
             } => {
+                if let Some(image) = image {
+                    extracted.surface_images.push((id.clone(), image.clone()));
+                }
                 let mut codes = Vec::new();
                 for grid in grids {
                     let bytes = buffers.get(grid.from.as_str()).ok_or_else(|| {
@@ -935,6 +1073,44 @@ fn outputs(
                     id.clone(),
                     clockwork_core::sound::Pcm::decode(bytes, *format, *rate),
                 ));
+            }
+            Output::Scene {
+                id,
+                from,
+                pixels_per_meter,
+            } => {
+                let mut lists = Vec::new();
+                for name in from {
+                    lists.push(made.places.get(name.as_str()).ok_or_else(|| {
+                        RecipeError::Part {
+                            id: id.clone(),
+                            message: format!("unknown placement list \"{name}\""),
+                        }
+                    })?);
+                }
+                let scene =
+                    SceneTemplate::from_placements(lists.into_iter().flatten(), *pixels_per_meter);
+                let shows = |item: &str| {
+                    recipe
+                        .outputs
+                        .iter()
+                        .any(|o| o.item().is_some_and(|(i, _)| i == item))
+                };
+                if let Some(node) = scene
+                    .nodes
+                    .iter()
+                    .find(|n| n.item.as_deref().is_some_and(|i| !shows(i)))
+                {
+                    return Err(RecipeError::Part {
+                        id: id.clone(),
+                        message: format!(
+                            "node \"{}\" shows \"{}\", which is not an image, model or sprite of this plugin",
+                            node.name,
+                            node.item.as_deref().unwrap_or_default()
+                        ),
+                    });
+                }
+                extracted.scenes.push((id.clone(), scene));
             }
             Output::Sprite {
                 id,
@@ -1803,6 +1979,99 @@ mod tests {
                 offset: 100
             })
         ));
+    }
+
+    #[test]
+    fn places_records_marks_their_cells_and_makes_a_scene() {
+        // Records of 6 bytes: kind, id, x (u16), y (u16); kind 0xFF ends the list.
+        let rom = [
+            1, 5, 24, 0, 8, 0, // a slime at (24, 8)
+            2, 9, 40, 0, 40, 0, // a door (kind 2) at (40, 40)
+            1, 7, 8, 0, 40, 0, // an unknown enemy at (8, 40)
+            0xFF, 0, 0, 0, 0, 0,
+        ];
+        let recipe: Recipe = ron::from_str(
+            r#"Recipe(
+                steps: [
+                    Read(name: "records", offset: 0, size: Some(24)),
+                    Fill(name: "pixels", size: 64, value: 0x11),
+                    Literal(name: "meta", hex: "00 00 00 00 00 00 00 00"),
+                    Literal(name: "map", hex: "00 00 00 00 00 00 00 00"),
+                    Literal(name: "pal", hex: "00 00 1F 00"),
+                    GbaPalettes(from: "pal", bank: "bg", slot: 1),
+                    GbaMetatileMap(tiles: "pixels", char_base: 0, metatiles: "meta", map: "map",
+                                   width: 2, bank: "bg", into: "room", depth: Bpp8),
+                    Places(from: "records", stride: 6, until: Some((field: (at: 0), values: [0xFF])),
+                           when: [(field: (at: 0), values: [1])],
+                           x: (at: 2, size: U16), y: (at: 4, size: U16), origin: (100, 0),
+                           item: Some((by: Some((at: 1)), outputs: { 5: "room" })),
+                           name: (text: "enemy {} #{index}", fields: [(at: 1)]),
+                           animation: Some((text: "frame_{}", fields: [(at: 0)])),
+                           group: Some((text: "Room")), code: Some((at: 1)), into: "enemies"),
+                    Places(from: "records", stride: 6, count: Some(3),
+                           when: [(field: (at: 0), values: [2])],
+                           x: (at: 2, size: U16), y: (at: 4, size: U16), origin: (100, 0),
+                           name: (text: "door"), door: Some((to: (text: "enemy {} #0", fields: [(at: 1)]))),
+                           extent: Some((by: (at: 0), sizes: { 2: (12, 4) })), into: "doors"),
+                    MarkPlaces(from: "enemies", width: 4, height: 4, cell_size: 16,
+                               origin: (100, 0), into: "cells"),
+                    MarkPlaces(from: "doors", width: 4, height: 4, cell_size: 16,
+                               origin: (100, 0), into: "cells"),
+                ],
+                outputs: [
+                    Image(id: "room", from: "room", kind: Some(Area)),
+                    Scene(id: "world", from: ["enemies", "doors"]),
+                ],
+            )"#,
+        )
+        .unwrap();
+        let extracted = run(&recipe, &rom).unwrap();
+
+        // 256 colors: byte 0x11 is color 17, palette 1's first color after transparent.
+        let (_, room) = &extracted.images[0];
+        assert_eq!(room.get(0, 0), [255, 0, 0, 255]);
+
+        let (_, scene) = &extracted.scenes[0];
+        let names: Vec<&str> = scene.nodes.iter().map(|n| n.name.as_str()).collect();
+        assert_eq!(names, ["enemy 5 #0", "enemy 7 #2", "door"]);
+        assert_eq!(scene.nodes[0].item.as_deref(), Some("room"));
+        assert_eq!(scene.nodes[1].item, None);
+        assert_eq!(scene.nodes[0].group.as_deref(), Some("Room"));
+        assert_eq!(scene.nodes[0].animation.as_deref(), Some("frame_1"));
+        // (24 + 100, 8) pixels at 16 per meter.
+        assert_eq!(scene.nodes[0].position, [7.75, 0.0, 0.5]);
+        assert_eq!(
+            scene.nodes[2].door.as_ref().map(|d| d.to.as_str()),
+            Some("enemy 9 #0")
+        );
+
+        // Enemies mark one cell with their id; the door, record 2 counting from 1, marks the
+        // cells (40, 40) ± (12, 4) pixels reach: x 28..52, columns 1 to 3 of row 2.
+        let mut made = Made::default();
+        for (i, s) in recipe.steps.iter().enumerate() {
+            run_step(i, s, &rom, &mut made).unwrap();
+        }
+        let cells = made.buffer("cells").unwrap();
+        assert_eq!(cells[1], 5);
+        assert_eq!(cells[2 * 4], 7);
+        assert_eq!(&cells[2 * 4 + 1..2 * 4 + 4], &[2, 2, 2]);
+    }
+
+    #[test]
+    fn a_scene_shows_only_this_plugins_outputs() {
+        let recipe: Recipe = ron::from_str(
+            r#"Recipe(
+                steps: [
+                    Literal(name: "r", hex: "00 00"),
+                    Places(from: "r", stride: 2, count: Some(1), x: (at: 0), y: (at: 1),
+                           item: Some((outputs: {}, other: Some("missing"))),
+                           name: (text: "x"), into: "p"),
+                ],
+                outputs: [Scene(id: "s", from: ["p"])],
+            )"#,
+        )
+        .unwrap();
+        assert!(matches!(run(&recipe, &[]), Err(RecipeError::Part { .. })));
     }
 }
 

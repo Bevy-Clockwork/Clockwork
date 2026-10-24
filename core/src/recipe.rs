@@ -12,6 +12,7 @@ use crate::character::CharacterSpec;
 use crate::character2d::Character2dSpec;
 use crate::item::ItemDef;
 use crate::model::Blend;
+pub use crate::place::{Extent, Match, PlaceDoor, PlaceItem, Template};
 use crate::surface::{SurfaceExtension, SurfaceProperty};
 use crate::terrain::Spawn;
 
@@ -65,7 +66,9 @@ pub enum Step {
         slot: u8,
     },
     /// Renders 16×16 metatiles (four GBA tile map entries each) into image `into`, `columns`
-    /// metatiles wide. Tile numbers count from `char_base` bytes into buffer `tiles`.
+    /// metatiles wide. Tile numbers count from `char_base` bytes into buffer `tiles`. Tiles are
+    /// 16-color (`depth: Bpp4`, the default) or 256-color (`Bpp8`, for backgrounds in 256-color
+    /// mode, which ignore the entries' palette numbers).
     GbaMetatiles {
         tiles: String,
         char_base: u32,
@@ -73,6 +76,8 @@ pub enum Step {
         bank: String,
         columns: u32,
         into: String,
+        #[serde(default, skip_serializing_if = "TileDepth::is_default")]
+        depth: TileDepth,
     },
     /// Renders a map of metatile numbers (buffer `map`, `width` metatiles wide) into image
     /// `into`, using the metatile definitions and tiles as in `GbaMetatiles`.
@@ -84,6 +89,8 @@ pub enum Step {
         width: u32,
         bank: String,
         into: String,
+        #[serde(default, skip_serializing_if = "TileDepth::is_default")]
+        depth: TileDepth,
     },
     /// Draws image `from` on top of image `into` (both must exist), skipping transparent pixels.
     /// With `region`, only pixels inside that rectangle are drawn (images line up at 0, 0).
@@ -233,6 +240,81 @@ pub enum Step {
         fps: f32,
         into: String,
     },
+    /// Places what a game lists in a table of records (the enemies of a room, its doors, the
+    /// rooms of an area) into placement list `into`, added to it if it exists, for a `Scene`
+    /// output or a `MarkPlaces` step. Records of `stride` bytes start at byte `at` of buffer
+    /// `from`: `count` of them, or up to the first that matches `until`. Only records matching
+    /// every `when` are placed, at (`x`, `y`) plus `origin` pixels; with `size` (width and height
+    /// fields) the position is the record's top left corner and the placement goes to its centre.
+    Places {
+        from: String,
+        #[serde(default)]
+        at: u32,
+        stride: u32,
+        #[serde(default)]
+        count: Option<u32>,
+        #[serde(default)]
+        until: Option<Box<Match>>,
+        #[serde(default)]
+        when: Vec<Match>,
+        x: Field,
+        y: Field,
+        #[serde(default)]
+        size: Option<(Field, Field)>,
+        #[serde(default)]
+        origin: (i32, i32),
+        /// The output each placement shows.
+        #[serde(default)]
+        item: Option<Box<PlaceItem>>,
+        name: Box<Template>,
+        /// The group node each placement goes under.
+        #[serde(default)]
+        group: Option<Box<Template>>,
+        /// Walking into the placement takes the player to another node.
+        #[serde(default)]
+        door: Option<Box<PlaceDoor>>,
+        /// The animation each placement's sprite or model plays: things that show one frame
+        /// chosen by their record (a sign's type) name it here.
+        #[serde(default)]
+        animation: Option<Box<Template>>,
+        /// What `MarkPlaces` writes into the cells: this field's value, else the record's number
+        /// from 1.
+        #[serde(default)]
+        code: Option<Field>,
+        /// How far the placement reaches, for `MarkPlaces` and doors; one cell without it.
+        #[serde(default)]
+        extent: Option<Box<Extent>>,
+        into: String,
+    },
+    /// Marks the cells each placement of list `from` covers with its code, in buffer `into`
+    /// (one byte per cell, `width` by `height` cells of `cell_size` pixels, made if new). `origin`
+    /// is where the grid's top left corner is in the placements' space, so the cells line up
+    /// with the image they cover: a surface grid of where things are, read from the game.
+    MarkPlaces {
+        from: String,
+        width: u32,
+        height: u32,
+        cell_size: u32,
+        #[serde(default)]
+        origin: (i32, i32),
+        into: String,
+    },
+}
+
+/// How many bits a GBA tile's pixel takes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TileDepth {
+    /// 16 colors, 32 bytes a tile: the palette comes from the tile map entry.
+    #[default]
+    Bpp4,
+    /// 256 colors, 64 bytes a tile.
+    Bpp8,
+}
+
+impl TileDepth {
+    pub fn is_default(&self) -> bool {
+        *self == TileDepth::Bpp4
+    }
 }
 
 fn empty_dialog() -> crate::asset::Slot<crate::ui::Dialog> {
@@ -711,6 +793,10 @@ pub enum Output {
         grids: Vec<SurfaceGrid>,
         #[serde(default)]
         extensions: Vec<SurfaceExtension>,
+        /// The image output it covers. Without it, an image of the same size is taken, which
+        /// is ambiguous when several images share a size.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        image: Option<String>,
     },
     /// A model, with its animations. `meters_per_unit` scales model units to meters. With
     /// `character`, the model can be played: how it moves and which animation goes with what.
@@ -852,6 +938,20 @@ pub enum Output {
         id: String,
         sounds: crate::asset::Slot<crate::ui::SoundSet>,
     },
+    /// A scene made of the placement lists `from` (see [`Step::Places`]): each placement a node
+    /// showing one of this plugin's outputs (or a named point), under its group, with its door.
+    /// Positions are pixels, `pixels_per_meter` to a meter. The Workshop adds it to its scene
+    /// as a group of nodes.
+    Scene {
+        id: String,
+        from: Vec<String>,
+        #[serde(default = "sixteen")]
+        pixels_per_meter: f32,
+    },
+}
+
+fn sixteen() -> f32 {
+    16.0
 }
 
 impl Output {
@@ -861,6 +961,7 @@ impl Output {
             Output::Image { id, kind, .. }
             | Output::Model { id, kind, .. }
             | Output::Sprite { id, kind, .. } => Some((id.as_str(), *kind)),
+            Output::Scene { id, .. } => Some((id.as_str(), Some(Kind::Scene))),
             Output::Surfaces { .. }
             | Output::Items { .. }
             | Output::Ability { .. }
@@ -908,6 +1009,8 @@ pub enum NameKind {
     Model,
     Collision,
     Sprite,
+    /// A placement list (see [`Step::Places`]).
+    Places,
 }
 
 impl NameKind {
@@ -919,6 +1022,7 @@ impl NameKind {
             NameKind::Model => "model",
             NameKind::Collision => "collision",
             NameKind::Sprite => "sprite",
+            NameKind::Places => "placement list",
         }
     }
 }
@@ -997,6 +1101,8 @@ impl Step {
             Step::GbaObjectFrames { .. } => "GbaObjectFrames",
             Step::MergeSprite { .. } => "MergeSprite",
             Step::KeyframeAnimation { .. } => "KeyframeAnimation",
+            Step::Places { .. } => "Places",
+            Step::MarkPlaces { .. } => "MarkPlaces",
         }
     }
 
@@ -1172,6 +1278,14 @@ impl Step {
                 port("from", from, Buffer, Read),
                 port("into", into, Sprite, Update),
             ],
+            Step::Places { from, into, .. } => vec![
+                port("from", from, Buffer, Read),
+                port("into", into, Places, Grow),
+            ],
+            Step::MarkPlaces { from, into, .. } => vec![
+                port("from", from, Places, Read),
+                port("into", into, Buffer, Grow),
+            ],
         }
     }
 }
@@ -1202,6 +1316,7 @@ impl Output {
             Output::Sound { .. } => "Sound",
             Output::Dialog { .. } => "Dialog",
             Output::Sounds { .. } => "Sounds",
+            Output::Scene { .. } => "Scene",
         }
     }
 
@@ -1229,7 +1344,8 @@ impl Output {
             | Output::Font { id, .. }
             | Output::Sound { id, .. }
             | Output::Dialog { id, .. }
-            | Output::Sounds { id, .. } => id,
+            | Output::Sounds { id, .. }
+            | Output::Scene { id, .. } => id,
         }
     }
 
@@ -1257,7 +1373,8 @@ impl Output {
             | Output::Font { id, .. }
             | Output::Sound { id, .. }
             | Output::Dialog { id, .. }
-            | Output::Sounds { id, .. } => *id = new.to_string(),
+            | Output::Sounds { id, .. }
+            | Output::Scene { id, .. } => *id = new.to_string(),
         }
     }
 
@@ -1312,6 +1429,16 @@ impl Output {
             } => vec![port("from", from, Buffer, Read)],
             Output::Font { from, .. } => vec![port("from", from, Image, Read)],
             Output::Sound { from, .. } => vec![port("from", from, Buffer, Read)],
+            Output::Scene { from, .. } => from
+                .iter()
+                .enumerate()
+                .map(|(i, name)| Port {
+                    path: vec![Seg::Field("from"), Seg::Index(i)],
+                    name,
+                    kind: Places,
+                    access: Read,
+                })
+                .collect(),
         }
     }
 }
@@ -1343,10 +1470,12 @@ pub enum Kind {
     Game,
     Font,
     Dialog,
+    /// Things placed together: the rooms of a world with their enemies and doors.
+    Scene,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 21] = [
+    pub const ALL: [Kind; 22] = [
         Kind::Area,
         Kind::Tileset,
         Kind::Sprite,
@@ -1368,6 +1497,7 @@ impl Kind {
         Kind::Game,
         Kind::Font,
         Kind::Dialog,
+        Kind::Scene,
     ];
 
     /// Singular label for the Editor, e.g. "Ability".
@@ -1394,6 +1524,7 @@ impl Kind {
             Kind::Game => "Game",
             Kind::Font => "Font",
             Kind::Dialog => "Dialog",
+            Kind::Scene => "Scene",
         }
     }
 
@@ -1421,6 +1552,7 @@ impl Kind {
             Kind::Game => "Games",
             Kind::Font => "Fonts",
             Kind::Dialog => "Dialogs",
+            Kind::Scene => "Scenes",
         }
     }
 }

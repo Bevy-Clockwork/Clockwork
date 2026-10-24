@@ -1,9 +1,11 @@
-//! GBA graphics: BGR555 palettes, 4bpp tiles and tile map entries.
+//! GBA graphics: BGR555 palettes, 4bpp and 8bpp tiles and tile map entries.
 
 use clockwork_core::image::RgbaImage;
+pub use clockwork_core::recipe::TileDepth;
 
 pub const TILE_SIZE: u32 = 8;
 const TILE_BYTES_4BPP: usize = 32;
+const TILE_BYTES_8BPP: usize = 64;
 
 /// Converts a BGR555 color to RGBA, scaling 5-bit channels to the full 8-bit range.
 pub fn bgr555_to_rgba(color: u16) -> [u8; 4] {
@@ -94,6 +96,48 @@ pub fn draw_tile_4bpp(
     }
 }
 
+/// Draws one 8bpp tile from `tiles` at pixel (x, y): each byte is a color of the whole
+/// 256-color palette, so the entry's palette number is ignored, as in 256-color mode.
+pub fn draw_tile_8bpp(
+    image: &mut RgbaImage,
+    x: u32,
+    y: u32,
+    tiles: &[u8],
+    entry: TileEntry,
+    palettes: &PaletteBank,
+) {
+    let start = entry.tile as usize * TILE_BYTES_8BPP;
+    let Some(data) = tiles.get(start..start + TILE_BYTES_8BPP) else {
+        return;
+    };
+    for py in 0..TILE_SIZE {
+        for px in 0..TILE_SIZE {
+            let index = data[(py * TILE_SIZE + px) as usize];
+            if index == 0 {
+                continue;
+            }
+            let dx = if entry.hflip { TILE_SIZE - 1 - px } else { px };
+            let dy = if entry.vflip { TILE_SIZE - 1 - py } else { py };
+            image.set(x + dx, y + dy, palettes.colors[index as usize]);
+        }
+    }
+}
+
+/// Draws one tile of `depth` (see [`draw_tile_4bpp`] and [`draw_tile_8bpp`]).
+pub fn draw_tile(
+    image: &mut RgbaImage,
+    (x, y): (u32, u32),
+    tiles: &[u8],
+    entry: TileEntry,
+    palettes: &PaletteBank,
+    depth: TileDepth,
+) {
+    match depth {
+        TileDepth::Bpp4 => draw_tile_4bpp(image, x, y, tiles, entry, palettes),
+        TileDepth::Bpp8 => draw_tile_8bpp(image, x, y, tiles, entry, palettes),
+    }
+}
+
 /// Renders 16×16 metatiles (four tile entries each: top-left, top-right, bottom-left,
 /// bottom-right) into a sheet `columns` metatiles wide.
 pub fn render_metatiles(
@@ -101,6 +145,7 @@ pub fn render_metatiles(
     metatiles: &[u8],
     palettes: &PaletteBank,
     columns: u32,
+    depth: TileDepth,
 ) -> RgbaImage {
     let count = (metatiles.len() / 8) as u32;
     let rows = count.div_ceil(columns.max(1));
@@ -111,13 +156,13 @@ pub fn render_metatiles(
         for (quarter, pair) in meta.as_chunks::<2>().0.iter().enumerate() {
             let entry = TileEntry::from_u16(u16::from_le_bytes([pair[0], pair[1]]));
             let q = quarter as u32;
-            draw_tile_4bpp(
+            draw_tile(
                 &mut image,
-                mx + (q % 2) * 8,
-                my + (q / 2) * 8,
+                (mx + (q % 2) * 8, my + (q / 2) * 8),
                 tiles,
                 entry,
                 palettes,
+                depth,
             );
         }
     }
@@ -132,6 +177,7 @@ pub fn render_metatile_map(
     map: &[u8],
     width: u32,
     palettes: &PaletteBank,
+    depth: TileDepth,
 ) -> RgbaImage {
     let count = (map.len() / 2) as u32;
     let width = width.max(1);
@@ -147,13 +193,13 @@ pub fn render_metatile_map(
         for (quarter, pair) in meta.as_chunks::<2>().0.iter().enumerate() {
             let entry = TileEntry::from_u16(u16::from_le_bytes([pair[0], pair[1]]));
             let q = quarter as u32;
-            draw_tile_4bpp(
+            draw_tile(
                 &mut image,
-                mx + (q % 2) * 8,
-                my + (q / 2) * 8,
+                (mx + (q % 2) * 8, my + (q / 2) * 8),
                 tiles,
                 entry,
                 palettes,
+                depth,
             );
         }
     }
@@ -203,5 +249,35 @@ mod tests {
         assert_eq!(image.get(7, 0), [255, 0, 0, 255]);
         assert_eq!(image.get(6, 0), [0, 255, 0, 255]);
         assert_eq!(image.get(0, 0)[3], 0);
+    }
+
+    #[test]
+    fn draws_8bpp_tiles_from_the_whole_palette() {
+        // Tile 1 (bytes 64..128): first row colors 0x11, 0x00, 0x21; the entry's palette is
+        // ignored.
+        let mut tiles = vec![0u8; 128];
+        tiles[64] = 0x11;
+        tiles[66] = 0x21;
+        let mut palettes = PaletteBank::default();
+        palettes.load(&[0, 0, 0x1F, 0], 1); // color 0x11: red
+        palettes.load(&[0, 0, 0xE0, 0x03], 2); // color 0x21: green
+        let mut image = RgbaImage::new(8, 8);
+        let entry = TileEntry {
+            tile: 1,
+            hflip: false,
+            vflip: false,
+            palette: 5,
+        };
+        draw_tile(
+            &mut image,
+            (0, 0),
+            &tiles,
+            entry,
+            &palettes,
+            TileDepth::Bpp8,
+        );
+        assert_eq!(image.get(0, 0), [255, 0, 0, 255]);
+        assert_eq!(image.get(1, 0)[3], 0);
+        assert_eq!(image.get(2, 0), [0, 255, 0, 255]);
     }
 }

@@ -62,7 +62,11 @@ GbaMetatiles(tiles: "vram", char_base: 0x0000, metatiles: "meta", bank: "bg", co
     Renders 16x16 metatiles (4 tile-map entries each: TL, TR, BL, BR; 8 bytes) as a sheet.
     Tile numbers count from char_base bytes into the tiles buffer; 4bpp, 32 bytes per tile.
 GbaMetatileMap(tiles: "vram", char_base: 0, metatiles: "meta", map: "room", width: 63, bank: "bg", into: "img")
-    Renders a map of u16 metatile numbers, width metatiles per row.
+    Renders a map of u16 metatile numbers, width metatiles per row. Both steps take
+    `depth: Bpp8` for backgrounds in 256-color mode (64-byte tiles, colors from the whole bank;
+    the BG control register's bit 7). Games that keep a background as a plain tile map of 32x32
+    screen blocks can still use it: regroup the entries into 16x16 metatiles with a Lookup
+    (indices: the four entries' positions of each metatile) and draw them with a map 0, 1, 2...
 Overlay(from: "top", into: "img")
     Draws image top over image img (both must exist), skipping transparent pixels.
 Overlay(from: "state_b", into: "img", region: Some((x: 0, y: 512, w: 384, h: 448)), replace: true)
@@ -202,12 +206,44 @@ KeyframeAnimation(from: "rom_low", name: "walk_south", at: Pointer(table: 0x1000
     record `index` of the directory gives the keyframe count and the first keyframe's number
     (keyframes numbered from offset `keys`); the count ends the list and `end` is not read.
 
+### Where things are (placements)
+
+Games keep where they put things in tables of records: room headers, exit lists, entity
+lists. Read them with Places instead of writing positions into the recipe (positions are game
+data, like graphics):
+
+Places(from: "rom", at: 0x1234, stride: 16, until: Some((field: (at: 0), values: [255])),
+       when: [(field: (at: 0, bits: 4), values: [3]), (field: (at: 2), values: [0])],
+       x: (at: 8, size: U16), y: (at: 10, size: U16), origin: (2048, 1024),
+       item: Some((outputs: {}, other: Some("enemy_slime"))),
+       name: (text: "Slime"), group: Some((text: "Forest")),
+       code: Some((at: 2)), into: "forest_enemies")
+    Adds a placement per record to list `into`: `count` records of `stride` bytes from byte
+    `at` of buffer `from`, or up to the first matching `until`; only records matching every
+    `when` (a field and the values it may hold). Positions are pixels, plus `origin` (where the
+    records' space starts: a room's place on the world map). With `size: Some((w, h))` (two
+    fields) the position is a top left corner and the placement goes to the centre.
+    `item: Some((by: Some(field), outputs: {value: "output"}, other))` picks the output each
+    shows by a field (by the record's number without `by`). `name`, `group` and a door's `to`
+    are templates: (text, fields), `{}` taking the next field's value, `{item}` the output,
+    `{index}` the record number. `door: Some((to: (text: "arrive {} {}", fields: [...]),
+    radius: 0.75))` makes walking into it take the player to the node of that name (place the
+    arrival points with another Places step whose names match). `extent: Some((by: field,
+    sizes: {value: (half_w, half_h)}))` says how far it reaches. `animation: Some((text:
+    "frame_{}", fields: [(at: 3)]))` names the animation each placement plays: objects that
+    show one frame chosen by their record (give the sprite a one-keyframe animation per frame,
+    from a Literal of keyframe records) or that start in another state.
+MarkPlaces(from: "forest_enemies", width: 64, height: 40, cell_size: 16, origin: (2048, 1024), into: "cells")
+    Marks the cells each placement covers with its `code` (a field of its record, or its
+    number from 1): a grid for a Surfaces output, so the map shows where enemies, doors and
+    objects are. `origin` is the grid's top left corner in the placements' space.
+
 ## Outputs
 
 Image(id: "area", from: "img", kind: Some(Area))
     kind sorts the image in the Editor's content browser: Area, Tileset, Sprite, Character,
     Ability, Object or Audio. Always set it; images without a kind are listed under Other.
-    An Area is a playable map; a Surfaces output of the same pixel size gives it collision.
+    An Area is a playable map; a Surfaces output covering it gives it collision.
 Surfaces(
     id: "surfaces", width: 63, cell_size: 16,
     grids: [
@@ -216,10 +252,18 @@ Surfaces(
          other: Some([Extension("game::Special")])),
     ],
     extensions: [(id: "game::Special", fallback: [Walkable])],
+    image: Some("area"),
 )
-    One code per cell per grid; a cell's properties are the union over grids. Every code needs
+    One code per cell per grid; a cell's properties are the union over grids. `image` names
+    the image it covers; without it, an image of the same pixel size is taken (ambiguous when a
+    plugin has several such images, as rooms of a game often are). Every code needs
     a meaning: list it in `codes`, or give `other` (an explicit catch-all; Some([]) means "no
     surface meaning"). Unlisted codes without `other` are an error, on purpose.
+Scene(id: "world", from: ["rooms", "forest_enemies", "forest_doors"], pixels_per_meter: 16.0)
+    The placement lists (Places steps) as one scene: a node per placement showing its item (an
+    image, model or sprite of this plugin), under its group node, with its door. The user places
+    it in the Workshop like any item and gets the whole group: rooms where the game's maps put
+    them, with their enemies, objects and doors. run_recipe previews it as a map.
 
 Shared surface properties: Solid, Walkable, FallThrough, Swimmable, Shallow,
 Damaging(Fire|Spikes|Electric|Generic), Slippery(0.0-1.0), Climbable, Friction(f32),

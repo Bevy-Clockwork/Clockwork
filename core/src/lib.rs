@@ -21,6 +21,7 @@ pub mod item;
 pub mod manifest;
 pub mod model;
 pub mod parts;
+pub mod place;
 pub mod platform;
 pub mod recipe;
 pub mod recipe_schema;
