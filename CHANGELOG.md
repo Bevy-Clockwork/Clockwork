@@ -4,6 +4,8 @@
 
 ### Added
 
+- `times` and `plus` on record fields: the number read is scaled, so records that keep
+  positions in tiles (`x + y * 64`) place things in pixels without per-record origins.
 - `behaviors` on `Places` steps: more `Behavior` outputs per placement, each picked like
   `behavior`, so a placed person can talk and block the way, or a chest be solid and open.
 - `params` on the `Text` recipe step: control codes followed by parameter bytes, which are
