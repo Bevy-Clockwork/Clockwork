@@ -326,7 +326,7 @@ fn nodes(
                 fade: door.fade,
             }));
         }
-        if let Some(name) = &node.behavior {
+        for name in &node.behaviors {
             let at = OutputRef::new(content.plugin, name);
             match behavior_asset(content, &at) {
                 Ok(behavior) => behaviors.push(NodeBehavior {
@@ -557,7 +557,7 @@ mod tests {
             position: at,
             door: None,
             animation: None,
-            behavior: None,
+            behaviors: Vec::new(),
         }
     }
 
@@ -580,7 +580,7 @@ mod tests {
         )
         .unwrap();
         let mut gem = node("Gem", None, [3.0, 0.0, 0.0]);
-        gem.behavior = Some("gem".into());
+        gem.behaviors = vec!["gem".into()];
         let mut door = node("Door", None, [6.0, 0.0, 0.0]);
         door.door = Some(Door {
             to: "Exit".into(),
