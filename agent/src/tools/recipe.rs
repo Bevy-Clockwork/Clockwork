@@ -66,6 +66,43 @@ fn terrain_summary(id: &str, terrain: &clockwork_core::terrain::Terrain) -> Stri
     out
 }
 
+/// An area image's animation and layers, back to front.
+fn layers_summary(layers: &clockwork_core::layer::Layers) -> String {
+    let frames = |f: &Option<clockwork_core::layer::Frames>| match f {
+        Some(f) => {
+            let ticks: u32 = (0..f.images.len()).map(|i| f.ticks_of(i)).sum();
+            format!(
+                ", {} frames looping every {:.2} s",
+                f.images.len(),
+                ticks as f32 / f.fps
+            )
+        }
+        None => String::new(),
+    };
+    let mut out = String::new();
+    for which in layers.draw_order() {
+        let line = match which {
+            None => format!("  the image itself{}", frames(&layers.frames)),
+            Some(i) => {
+                let l = &layers.layers[i];
+                format!(
+                    "  layer {i}: {}×{} px, order {}, scroll ({}, {}){}{}{}",
+                    l.image.width,
+                    l.image.height,
+                    l.order,
+                    l.scroll.0,
+                    l.scroll.1,
+                    if l.wrap { ", wraps" } else { "" },
+                    if l.over_sprites { ", over sprites" } else { "" },
+                    frames(&l.frames)
+                )
+            }
+        };
+        let _ = writeln!(out, "{line}");
+    }
+    out
+}
+
 /// A text report of what a recipe produced.
 pub fn summary(extracted: &Extracted) -> String {
     let mut out = String::new();
@@ -85,6 +122,9 @@ pub fn summary(extracted: &Extracted) -> String {
             image.height,
             opaque as f64 * 100.0 / total as f64
         );
+        if let Some(layers) = extracted.layers(id) {
+            out.push_str(&layers_summary(layers));
+        }
     }
     for m in &extracted.models {
         let (id, model, meters) = (&m.id, &m.model, m.meters_per_unit);
@@ -388,9 +428,17 @@ pub fn previews(
             let shown = preview::fit(&preview::on_checkerboard(&sheet), PREVIEW_SIZE);
             Ok((label, png(&shown)?))
         });
+        // An area with layers shows them all, as it first appears.
         let images = extracted.images.iter().map(|(id, image)| {
-            let shown = preview::fit(&preview::on_checkerboard(image), PREVIEW_SIZE);
-            Ok((format!("Preview of \"{id}\""), png(&shown)?))
+            let (label, image) = match extracted.layers(id) {
+                Some(layers) => (
+                    format!("Preview of \"{id}\" with its layers (first frames, not scrolled)"),
+                    preview::layered(image, layers),
+                ),
+                None => (format!("Preview of \"{id}\""), image.clone()),
+            };
+            let shown = preview::fit(&preview::on_checkerboard(&image), PREVIEW_SIZE);
+            Ok((label, png(&shown)?))
         });
         let scenes = extracted.scenes.iter().map(|(id, scene)| {
             let image = |output: &str| {
@@ -588,6 +636,31 @@ pub fn save(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn layers_are_listed_back_to_front() {
+        use clockwork_core::layer::{Frames, Layer, Layers};
+        let layers = Layers {
+            frames: Some(Frames {
+                images: vec![RgbaImage::new(1, 1); 3],
+                ticks: vec![20],
+                fps: 60.0,
+            }),
+            layers: vec![Layer {
+                image: RgbaImage::new(256, 256),
+                order: -1,
+                scroll: (0.25, 0.5),
+                wrap: true,
+                over_sprites: false,
+                frames: None,
+            }],
+        };
+        assert_eq!(
+            layers_summary(&layers),
+            "  layer 0: 256×256 px, order -1, scroll (0.25, 0.5), wraps\n  \
+             the image itself, 3 frames looping every 1.00 s\n"
+        );
+    }
 
     #[test]
     fn plugin_ids_are_plain_folder_names() {

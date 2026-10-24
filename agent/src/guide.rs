@@ -245,7 +245,8 @@ MarkPlaces(from: "forest_enemies", width: 64, height: 40, cell_size: 16, origin:
 Image(id: "area", from: "img", kind: Some(Area))
     kind sorts the image in the Editor's content browser: Area, Tileset, Sprite, Character,
     Ability, Object or Audio. Always set it; images without a kind are listed under Other.
-    An Area is a playable map; a Surfaces output covering it gives it collision.
+    An Area is a playable map; a Surfaces output covering it gives it collision. An area can
+    have background layers and animated tiles: see "Background layers and animated tiles".
 Surfaces(
     id: "surfaces", width: 63, cell_size: 16,
     grids: [
@@ -536,7 +537,39 @@ position (a large town map), by animation (water, flowers) or by story state. Si
 magenta or garbage tiles in only part of a render, or wrong art in one region. Search the decomp
 for managers that copy graphics (e.g. "TileSetManager", "LoadGfx", region checks). To show the
 area as players see it, build one VRAM per state (Place), render each, and draw each state only
-in its region with Overlay(region, replace: true).
+in its region with Overlay(region, replace: true). Tiles swapped by animation are `frames`
+(next section), not a still image.
+
+## Background layers and animated tiles
+
+GBA areas are drawn as up to four backgrounds (BG0-BG3): the map, a far layer that scrolls
+slower (sky, clouds, a distant forest) and parts drawn over the characters (treetops, roofs,
+bridges). Render each background with GbaMetatileMap into its own image and list them on the
+area's Image output:
+
+Image(id: "forest", from: "bg2", kind: Some(Area),
+      frames: Some((images: ["bg2", "bg2_water_1", "bg2_water_2"], ticks: [12], fps: 59.7275)),
+      layers: [
+          (from: "bg3", order: -1, scroll: (0.25, 0.25), wrap: true),
+          (from: "bg1", order: 1, over_sprites: true),
+      ])
+    `from` is the area itself (the layer its Surfaces cover, order 0). Each layer: `order`
+    (higher draws over lower; equal orders draw after the area, as listed), `scroll` (how far it
+    moves per meter the camera moves, across and down: 1.0 like the map, 0.25 far away, 0.0
+    fixed to the screen; read it from the code that sets the background's scroll registers: a
+    background scrolled by the camera position shifted right by 2 has 0.25), `wrap` (repeats the image across the area, like a hardware
+    background that is smaller than the map) and `over_sprites` (drawn over characters: the
+    hardware priority of that background is above the sprites'). Layers line up with the area
+    when the camera is at its top left corner. Play mode scrolls them; the Workshop shows them
+    unscrolled. Transparent pixels show what is behind.
+    `frames` (on the area or on any layer) are images shown in turn in place of the still one,
+    each for its `ticks` (one number per image, or one for all) at `fps` ticks a second, looping:
+    water, lava, flowers. Games animate tiles by copying new tile graphics into VRAM every few
+    frames from a list of sources (search the decomp for the tile animation table or the code
+    that copies to VRAM on a timer). Build one VRAM per frame (Place each frame's tiles where the
+    game copies them), render the same map with each, and list the renders. Every frame must be
+    the size of the image it replaces. run_recipe lists the layers back to front and previews
+    the area with all of them.
 
 ## Habits that work
 

@@ -5,6 +5,7 @@
 use clockwork_core::action::AttachmentFrames;
 use clockwork_core::character2d::{Character2d, Direction4};
 use clockwork_core::image::RgbaImage;
+use clockwork_core::layer::{Frames, Layers};
 use clockwork_core::model::{Animation, Blend, Model, Shading};
 use clockwork_core::sprite::{Sprite, SpriteAnimation, SpriteFrame};
 use clockwork_core::surface::{SurfaceMap, SurfaceProperty};
@@ -138,6 +139,37 @@ pub fn blend(base: &RgbaImage, top: &RgbaImage) -> RgbaImage {
             let a = t[3] as u32;
             let mix = |i: usize| ((t[i] as u32 * a + b[i] as u32 * (255 - a)) / 255) as u8;
             out.set(x, y, [mix(0), mix(1), mix(2), b[3].max(t[3])]);
+        }
+    }
+    out
+}
+
+/// An area as it first appears: its layers drawn back to front with the area image, each
+/// showing its first frame, wrapping layers repeated across the area, nothing scrolled.
+pub fn layered(image: &RgbaImage, layers: &Layers) -> RgbaImage {
+    let first = |still: &RgbaImage, frames: &Option<Frames>| {
+        frames
+            .as_ref()
+            .and_then(|f| f.images.first())
+            .unwrap_or(still)
+            .clone()
+    };
+    let mut out = RgbaImage::new(image.width, image.height);
+    for which in layers.draw_order() {
+        let Some(i) = which else {
+            out.overlay(&first(image, &layers.frames), 0, 0);
+            continue;
+        };
+        let layer = &layers.layers[i];
+        let shown = first(&layer.image, &layer.frames);
+        if !layer.wrap || shown.width == 0 || shown.height == 0 {
+            out.overlay(&shown, 0, 0);
+            continue;
+        }
+        for y in (0..image.height).step_by(shown.height as usize) {
+            for x in (0..image.width).step_by(shown.width as usize) {
+                out.overlay(&shown, x, y);
+            }
         }
     }
     out
@@ -1037,5 +1069,51 @@ mod tests {
         assert_eq!((fit(&marked, 4).width, fit(&marked, 4).height), (4, 2));
         assert_eq!((fit(&marked, 64).width, fit(&marked, 64).height), (64, 32));
         assert_eq!(on_checkerboard(&marked).get(0, 0)[3], 255);
+    }
+
+    #[test]
+    fn layered_areas_draw_back_to_front_with_wrapping_layers_repeated() {
+        use clockwork_core::layer::Layer;
+        let filled = |w, h, rgba| {
+            let mut image = RgbaImage::new(w, h);
+            for y in 0..h {
+                for x in 0..w {
+                    image.set(x, y, rgba);
+                }
+            }
+            image
+        };
+        let red = [255, 0, 0, 255];
+        let blue = [0, 0, 255, 255];
+        let green = [0, 255, 0, 255];
+        // The map is see-through on its right half.
+        let mut map = filled(4, 2, red);
+        map.set(2, 0, [0; 4]);
+        map.set(3, 0, [0; 4]);
+        let layer = |image, order, wrap, over_sprites| Layer {
+            image,
+            order,
+            scroll: (0.5, 0.5),
+            wrap,
+            over_sprites,
+            frames: None,
+        };
+        let layers = Layers {
+            frames: Some(Frames {
+                images: vec![map.clone()],
+                ticks: vec![1],
+                fps: 60.0,
+            }),
+            layers: vec![
+                layer(filled(1, 1, green), 0, false, true),
+                layer(filled(2, 2, blue), -1, true, false),
+            ],
+        };
+        let shown = layered(&RgbaImage::new(4, 2), &layers);
+        assert_eq!(shown.get(1, 1), red);
+        // The sky shows through, repeated across the area.
+        assert_eq!(shown.get(3, 0), blue);
+        // The foreground goes over everything.
+        assert_eq!(shown.get(0, 0), green);
     }
 }

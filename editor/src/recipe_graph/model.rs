@@ -31,6 +31,11 @@ impl OwnedPort {
         match self.path.as_slice() {
             [Seg::Field("segments"), Seg::Key(k)] => format!("segment {k:#04x}"),
             [Seg::Field("grids"), Seg::Index(i), ..] => format!("grid {i}"),
+            [Seg::Field("frames"), _, Seg::Index(j)] => format!("frame {j}"),
+            [Seg::Field("layers"), Seg::Index(i), Seg::Field("from")] => format!("layer {i}"),
+            [Seg::Field("layers"), Seg::Index(i), .., Seg::Index(j)] => {
+                format!("layer {i} frame {j}")
+            }
             [Seg::Field(outer), Seg::Field(inner), ..] if *inner != "from" => (*inner).into(),
             [Seg::Field(field), ..] => (*field).into(),
             _ => "?".into(),
@@ -212,4 +217,27 @@ pub(super) fn lineage(resolution: &Resolution, node: RNode) -> HashSet<RNode> {
         }
     }
     set
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_area_s_layers_and_frames_are_labelled_by_number() {
+        let recipe: Recipe = ron::from_str(
+            r#"(steps: [], outputs: [Image(id: "a", from: "map",
+                frames: Some((images: ["map", "map_b"], ticks: [8], fps: 60.0)),
+                layers: [(from: "sky", frames: Some((images: ["sky_b"], ticks: [8], fps: 60.0)))])])"#,
+        )
+        .unwrap();
+        let labels: Vec<String> = ports_of(&recipe, RNode::Output(0))
+            .iter()
+            .map(OwnedPort::label)
+            .collect();
+        assert_eq!(
+            labels,
+            ["from", "frame 0", "frame 1", "layer 0", "layer 0 frame 0"]
+        );
+    }
 }

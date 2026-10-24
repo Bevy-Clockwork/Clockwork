@@ -720,6 +720,35 @@ read as a platform format (`clockwork_gba::m4a`), not per game.
 Not yet: modulation (vibrato), reverb, compressed samples, and the engine's exact mixing rate
 and volume curve, so songs sound close to the game but not identical.
 
+### 7.10.3 Background layers and animated tiles (implemented)
+
+2D consoles draw an area as several backgrounds: a far one that scrolls slower than the camera,
+the map, and parts drawn over the characters. Tiles that move (water, lava, flowers) are tile
+graphics the game copies into video memory every few frames. Both are data
+(`clockwork_core::layer`), written on the area's `Image` output:
+
+- **Layers:** images the recipe's steps made (one `GbaMetatileMap` per background), each with a
+  draw `order` (the area's own image is 0), a `scroll` factor across and down (1.0 moves with
+  the map, 0.25 far away, 0.0 fixed to the screen), `wrap` (the image repeats across the area,
+  like a hardware background smaller than the map) and `over_sprites` (drawn over characters).
+  Layers line up with the area when the camera is at its top left corner, as scroll registers
+  do. The area's surfaces stay on its own image; layers have no collision.
+- **Animated tiles:** `frames` on the area or on any layer: images shown in turn in place of the
+  still one, each for its ticks at the game's tick rate, looping. A recipe builds one video
+  memory per frame of the game's tile animation table and renders the same map with each, so
+  every place a tile is used animates. Frames must be the size of the image they replace.
+- **Viewport** (`editor/src/layers.rs`): each layer is a plane a little above or below the area
+  in draw order, layers over sprites above the sprites; frames swap textures; while playing,
+  layers move with the camera by what their scroll leaves out (wrapping ones move their
+  texture). The Workshop shows them unscrolled. Clicks go through layers to what is under them.
+- **Checks and previews:** frame timing and scroll are checked when a plugin is saved, a frame
+  of the wrong size fails the extraction, and `run_recipe` lists the layers back to front and
+  previews the area with all of them.
+
+Not yet: layers that scroll on their own (moving clouds, waterfalls by offset), palette
+animation (colors cycling instead of tiles), per-layer blending and window effects, and
+hardware tile animation without rendering each frame's whole map.
+
 ### 7.11 Abilities and composition plugins (implemented)
 
 Moves go from one character to another, across games and between 2D and 3D:

@@ -19,6 +19,7 @@ pub mod game;
 pub mod image;
 pub mod input;
 pub mod item;
+pub mod layer;
 pub mod manifest;
 pub mod model;
 pub mod parts;

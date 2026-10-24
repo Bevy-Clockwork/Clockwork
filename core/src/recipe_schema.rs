@@ -487,7 +487,7 @@ pub const STEPS: &[VariantInfo] = &[
 pub const OUTPUTS: &[VariantInfo] = &[
     VariantInfo {
         name: "Image",
-        about: "An image the plugin provides.",
+        about: "An image the plugin provides; an area can have layers and animated tiles.",
         fields: &[
             f("id", Text, "Its id in the plugin"),
             f("from", Name, "The image"),
@@ -495,6 +495,16 @@ pub const OUTPUTS: &[VariantInfo] = &[
                 "kind",
                 Optional(&KIND),
                 "Where the content browser lists it",
+            ),
+            d(
+                "layers",
+                Structure,
+                "Images drawn with it: [(from, order, scroll, wrap, over_sprites, frames), …]",
+            ),
+            d(
+                "frames",
+                Optional(&STRUCTURE),
+                "Images it cycles through (animated tiles): (images, ticks, fps)",
             ),
         ],
     },

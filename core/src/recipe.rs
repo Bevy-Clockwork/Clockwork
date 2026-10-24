@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::character::CharacterSpec;
 use crate::character2d::Character2dSpec;
 use crate::item::ItemDef;
+use crate::layer::{FramesSpec, LayerSpec};
 use crate::model::Blend;
 pub use crate::place::{Extent, Match, PlaceDoor, PlaceItem, Template};
 use crate::surface::{SurfaceExtension, SurfaceProperty};
@@ -781,12 +782,18 @@ pub enum Codec {
 #[serde(deny_unknown_fields)]
 pub enum Output {
     /// An image the plugin provides, under a stable `id`. `kind` sorts it in the Editor's
-    /// content browser; without one it is listed under Other.
+    /// content browser; without one it is listed under Other. An area can have `layers` drawn
+    /// with it (backgrounds, foregrounds) and `frames` it cycles through (animated tiles), see
+    /// [`crate::layer`].
     Image {
         id: String,
         from: String,
         #[serde(default)]
         kind: Option<Kind>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        layers: Vec<LayerSpec>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        frames: Option<FramesSpec>,
     },
     /// A surface map: `width` cells wide, each `cell_size` native units, built from one or more
     /// grids of codes. Game-specific surfaces are declared in `extensions`.
@@ -1096,6 +1103,23 @@ fn port<'a>(field: &'static str, name: &'a str, kind: NameKind, access: Access) 
         kind,
         access,
     }
+}
+
+/// The images of `frames` (written at `at`), all read.
+fn frame_ports(at: Vec<Seg>, frames: Option<&FramesSpec>) -> Vec<Port<'_>> {
+    let images = frames.into_iter().flat_map(|f| f.images.iter().enumerate());
+    images
+        .map(|(i, name)| Port {
+            path: [
+                at.clone(),
+                vec![Seg::Field("frames"), Seg::Field("images"), Seg::Index(i)],
+            ]
+            .concat(),
+            name,
+            kind: NameKind::Image,
+            access: Access::Read,
+        })
+        .collect()
 }
 
 impl Step {
@@ -1408,7 +1432,26 @@ impl Output {
         use Access::*;
         use NameKind::*;
         match self {
-            Output::Image { from, .. } => vec![port("from", from, Image, Read)],
+            Output::Image {
+                from,
+                layers,
+                frames,
+                ..
+            } => {
+                let mut ports = vec![port("from", from, Image, Read)];
+                ports.extend(frame_ports(Vec::new(), frames.as_ref()));
+                for (i, layer) in layers.iter().enumerate() {
+                    let at = vec![Seg::Field("layers"), Seg::Index(i)];
+                    ports.push(Port {
+                        path: [at.clone(), vec![Seg::Field("from")]].concat(),
+                        name: &layer.from,
+                        kind: Image,
+                        access: Read,
+                    });
+                    ports.extend(frame_ports(at, layer.frames.as_ref()));
+                }
+                ports
+            }
             Output::Surfaces { grids, .. } => grids
                 .iter()
                 .enumerate()
@@ -1726,5 +1769,39 @@ mod tests {
                 codec: Codec::None
             }
         );
+    }
+
+    #[test]
+    fn an_area_names_its_layers_and_frames() {
+        let output: Output = ron::from_str(
+            r#"Image(id: "town", from: "map", kind: Some(Area),
+                frames: Some((images: ["map", "map_b"], ticks: [16], fps: 60.0)),
+                layers: [
+                    (from: "sky", order: -1, scroll: (0.25, 0.25), wrap: true),
+                    (from: "roofs", over_sprites: true,
+                     frames: Some((images: ["roofs_a", "roofs_b"], ticks: [8, 8], fps: 60.0))),
+                ])"#,
+        )
+        .unwrap();
+        let names: Vec<&str> = output.ports().iter().map(|p| p.name).collect();
+        assert_eq!(
+            names,
+            ["map", "map", "map_b", "sky", "roofs", "roofs_a", "roofs_b"]
+        );
+        assert_eq!(
+            output.ports()[6].path,
+            vec![
+                Seg::Field("layers"),
+                Seg::Index(1),
+                Seg::Field("frames"),
+                Seg::Field("images"),
+                Seg::Index(1)
+            ]
+        );
+        let written = ron::to_string(&output).unwrap();
+        assert_eq!(ron::from_str::<Output>(&written).unwrap(), output);
+        // A plain image is written as before.
+        let plain: Output = ron::from_str(r#"Image(id: "a", from: "b")"#).unwrap();
+        assert!(!ron::to_string(&plain).unwrap().contains("layers"));
     }
 }

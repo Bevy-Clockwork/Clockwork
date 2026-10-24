@@ -24,7 +24,7 @@ use clockwork_core::{
 use clockwork_recipe::{Extracted, Plugin};
 
 use crate::{
-    ViewportCamera, models,
+    ViewportCamera, layers, models,
     scene::{ItemRef, Node, NodeId, ROOT},
     settings::Settings,
     sprites,
@@ -360,6 +360,7 @@ pub struct SceneView {
     models: HashMap<(String, String), models::BuiltModel>,
     sprites: HashMap<(String, String), sprites::BuiltSprite>,
     overlays: HashMap<(String, String), Handle<Image>>,
+    layers: HashMap<(String, String), layers::BuiltLayers>,
     /// Frame the camera on this node once it's built.
     frame: Option<NodeId>,
 }
@@ -635,6 +636,7 @@ pub fn scene_system(
         view.models.clear();
         view.sprites.clear();
         view.overlays.clear();
+        view.layers.clear();
         view.revision = 0;
     }
     let rebuild =
@@ -757,21 +759,41 @@ pub fn scene_system(
                 .entry(key.clone())
                 .or_insert_with(|| images.add(to_bevy_image(image)))
                 .clone();
-            commands.spawn((
-                NodeImage {
-                    node: node.id,
+            let material = materials.add(StandardMaterial {
+                base_color_texture: Some(texture),
+                unlit: true,
+                alpha_mode: AlphaMode::Mask(0.5),
+                ..default()
+            });
+            let plane = commands
+                .spawn((
+                    NodeImage {
+                        node: node.id,
+                        size,
+                    },
+                    Mesh3d(mesh.clone()),
+                    MeshMaterial3d(material.clone()),
+                    Transform::IDENTITY,
+                    ChildOf(node_entity),
+                ))
+                .id();
+            // Its background layers and animated tiles.
+            if let Some(found) = extracted.layers(&item.output) {
+                let built = view
+                    .layers
+                    .entry(key.clone())
+                    .or_insert_with(|| layers::build(found, scale.to_meters(1.0), &mut images))
+                    .clone();
+                layers::animate_area(&mut commands, &built, size, plane, material);
+                layers::spawn(
+                    &mut commands,
+                    &mut meshes,
+                    &mut materials,
+                    &built,
                     size,
-                },
-                Mesh3d(mesh.clone()),
-                MeshMaterial3d(materials.add(StandardMaterial {
-                    base_color_texture: Some(texture),
-                    unlit: true,
-                    alpha_mode: AlphaMode::Mask(0.5),
-                    ..default()
-                })),
-                Transform::IDENTITY,
-                ChildOf(node_entity),
-            ));
+                    node_entity,
+                );
+            }
             if let Some(map) = surfaces_for(extracted, &item.output) {
                 let overlay = view
                     .overlays
@@ -932,7 +954,7 @@ fn visibility(visible: bool) -> Visibility {
     }
 }
 
-fn to_bevy_image(image: &RgbaImage) -> Image {
+pub(crate) fn to_bevy_image(image: &RgbaImage) -> Image {
     let mut bevy_image = Image::new(
         Extent3d {
             width: image.width,

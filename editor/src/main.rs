@@ -19,6 +19,7 @@ mod game_ui;
 mod graph_view;
 mod imports;
 mod kit;
+mod layers;
 mod manipulate;
 mod models;
 mod overlays;
@@ -151,7 +152,8 @@ fn main() {
                 sprites::projectile_system,
                 sprites::hand_system,
                 manipulate::manipulate_system,
-                workshop::camera_system,
+                // Layers scroll with where the camera looks.
+                (workshop::camera_system, layers::layers_system).chain(),
                 workshop::surface_system,
                 fighting::gizmo_system,
                 overlays::overlay_system,

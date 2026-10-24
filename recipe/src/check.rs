@@ -51,6 +51,17 @@ pub fn check(index: &AssetIndex, plugin: Option<&str>) -> Vec<Problem> {
                 message,
             }));
         }
+        // An area's animated tiles and layers have timing and scroll that work.
+        if let Some(Output::Image { layers, frames, .. }) = asset.output {
+            let problems_here = (frames.iter().filter_map(|f| f.problem()))
+                .chain(layers.iter().filter_map(|l| l.problem()));
+            for message in problems_here {
+                problems.push(Problem {
+                    at: asset.at.clone(),
+                    message,
+                });
+            }
+        }
         if let Some(Output::Game { game, .. }) = asset.output
             && let Some(game) = follow(index, game, |o| match o {
                 Output::Game { game, .. } => Some(game),
@@ -326,6 +337,31 @@ mod tests {
                 "p/hud: its icon \"p/head\" doesn't exist",
                 "p/game: its HUD counts \"star\", which its items don't have",
                 "p/game: the HUD word stop_playing \"EXIT\" uses letters the font p/font doesn't have: X",
+            ],
+            "{problems:#?}"
+        );
+    }
+
+    #[test]
+    fn animated_tiles_need_timing_that_works() {
+        let plugins = [plugin(
+            r#"(steps: [], outputs: [
+                Image(id: "area", from: "map", kind: Some(Area),
+                      frames: Some((images: ["a", "b"], ticks: [8, 8, 8], fps: 60.0)),
+                      layers: [(from: "water", frames: Some((images: ["w"], ticks: [4], fps: 0.0))),
+                               (from: "sky", scroll: (0.5, 0.5))]),
+            ])"#,
+        )];
+        let index = AssetIndex::build(&plugins);
+        let problems: Vec<String> = check(&index, Some("p"))
+            .iter()
+            .map(|p| p.to_string())
+            .collect();
+        assert_eq!(
+            problems,
+            [
+                "p/area: frames have 2 images but 3 ticks (give one per image, or one for all)",
+                "p/area: layer \"water\": frames need fps above 0, not 0",
             ],
             "{problems:#?}"
         );

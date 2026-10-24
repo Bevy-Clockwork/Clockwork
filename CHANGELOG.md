@@ -28,6 +28,12 @@
 - `clockwork_runtime::play`: Play's simulation (the played character, its actions and items,
   the scene's behaviors, rules and goals) runs without a window, so it can be tested headless.
   The editor's Play mode drives it.
+- `layers` on area `Image` outputs: background and foreground layers with a draw order, a
+  scroll factor (parallax) and wrapping, and layers drawn over sprites. Play scrolls them with
+  the camera.
+- `frames` on area images and their layers: animated tiles (water, lava, flowers) as images
+  shown in turn, each for its ticks. The Workshop and Play animate them; `run_recipe` previews
+  an area with all its layers.
 
 ### Fixed
 
