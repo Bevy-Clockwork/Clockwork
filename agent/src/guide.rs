@@ -192,7 +192,8 @@ GbaObjectFrames(tiles: "gfx", bank: "obj", objects: "lists", layout: Oam, frames
                     hflip: Some((at: 2, shift: 2, bits: 1)), tile: (at: 3, size: U16, bits: 10),
                     palette: Some((at: 3, size: U16, shift: 12, bits: 4))))
     A field is `size` bytes (U8, U16, U32, little-endian) at byte `at`, shifted right by `shift`,
-    keeping `bits` bits (0: all), two's complement with `signed`. Shape 0 is square, 1 wide,
+    keeping `bits` bits (0: all), two's complement with `signed`, then multiplied by `times`
+    and `plus` added (positions kept in tiles: `times: 16, plus: 8` is a tile's centre). Shape 0 is square, 1 wide,
     2 tall; size 0..3 grows (8x8 .. 64x64 for squares).
     Games whose frame records hold (object count, first object, first palette) instead of
     counted lists: `counts: Some(<table>)` gives each frame's object count (lists are then
@@ -231,7 +232,9 @@ Places(from: "rom", at: 0x1234, stride: 16, until: Some((field: (at: 0), values:
     `at` of buffer `from`, or up to the first matching `until`; only records matching every
     `when` (a field and the values it may hold). Positions are pixels, plus `origin` (where the
     records' space starts: a room's place on the world map). With `size: Some((w, h))` (two
-    fields) the position is a top left corner and the placement goes to the centre.
+    fields) the position is a top left corner and the placement goes to the centre. Records
+    that keep a tile number (x + y * 64) instead of pixels: x: (at: 4, size: U16, bits: 6,
+    times: 16, plus: 8), y: (at: 4, size: U16, shift: 6, bits: 6, times: 16, plus: 8).
     `item: Some((by: Some(field), outputs: {value: "output"}, other))` picks the output each
     shows by a field (by the record's number without `by`). `name`, `group` and a door's `to`
     are templates: (text, fields), `{}` taking the next field's value, `{item}` the output,
@@ -244,6 +247,9 @@ Places(from: "rom", at: 0x1234, stride: 16, until: Some((field: (at: 0), values:
     from a Literal of keyframe records) or that start in another state. `behavior:
     Some((by: Some((at: 1)), outputs: {3: "octorok", 7: "moblin"}))` picks, like `item`, the
     `Behavior` output each placement does when played: an enemy's `Actor` by its kind field.
+    `behaviors: [(outputs: {}, other: Some("solid")), (by: ..., outputs: {...})]` adds more,
+    each picked the same way (a person who talks and blocks the way, a chest that is solid
+    and opens); a pick that finds nothing for a record adds nothing.
 MarkPlaces(from: "forest_enemies", width: 64, height: 40, cell_size: 16, origin: (2048, 1024), into: "cells")
     Marks the cells each placement covers with its `code` (a field of its record, or its
     number from 1): a grid for a Surfaces output, so the map shows where enemies, doors and
