@@ -8,6 +8,7 @@
 pub mod actors;
 pub mod entities;
 pub mod fighter;
+pub mod script;
 pub mod world;
 
 use bevy::math::{Vec2, Vec3};
@@ -346,6 +347,10 @@ pub struct Play {
     pub fade: Option<Fade>,
     /// The goal is reached: the game stands still.
     pub won: bool,
+    /// Scripts running.
+    pub scripts: Vec<script::Running>,
+    /// Nodes scripts moved, and where they are now.
+    pub moved: std::collections::HashMap<NodeId, Vec3>,
     /// Simulation time not stepped yet.
     leftover: f32,
 }
@@ -364,6 +369,8 @@ struct Outcome {
     picked: bool,
     /// The node a door or a teleport took the player to.
     arrived: Option<String>,
+    /// Scripts started.
+    scripts: Vec<clockwork_core::script::Script>,
 }
 
 impl Play {
@@ -387,6 +394,8 @@ impl Play {
             rules,
             fade: None,
             won: false,
+            scripts: Vec::new(),
+            moved: Default::default(),
             leftover: 0.0,
         }
     }
@@ -436,6 +445,11 @@ impl Play {
             .refresh(&|item| inventory.map_or(0, |i| i.count(item)));
     }
 
+    /// A script holds the player still (as in a cutscene).
+    pub fn held(&self) -> bool {
+        self.scripts.iter().any(|s| s.hold)
+    }
+
     /// How dark the screen is for a door's fade, 0 to 1.
     pub fn darkness(&self) -> f32 {
         self.fade.as_ref().map_or(0.0, Fade::darkness)
@@ -452,13 +466,19 @@ impl Play {
         words: &Words,
     ) -> Vec<Happened> {
         let mut happened = Vec::new();
-        let controls = &frame.controls;
+        let still = Controls::default();
+        let held = self.held();
+        let controls = if held { &still } else { &frame.controls };
         if let Avatar::Model(m) = &mut self.avatar
             && controls.jump
         {
             m.jump_buffer = JUMP_BUFFER;
         }
-        self.fighter.feed(&controls.buttons, &frame.requests);
+        if held {
+            self.fighter.feed(&still.buttons, &[]);
+        } else {
+            self.fighter.feed(&controls.buttons, &frame.requests);
+        }
         self.leftover += frame.sim_dt;
         while self.leftover >= STEP {
             self.leftover -= STEP;
@@ -479,7 +499,9 @@ impl Play {
         let outcome = if frame.screen {
             Outcome::default()
         } else {
-            self.run_entities(frame.sim_dt, places, words, &mut happened)
+            let mut outcome = self.run_entities(frame.sim_dt, places, words, &mut happened);
+            self.run_scripts(frame.sim_dt, places, words, &mut outcome, &mut happened);
+            outcome
         };
         if let Some(at) = outcome.teleport {
             self.avatar.teleport(at);
@@ -599,6 +621,59 @@ impl Play {
         if reached {
             self.won = true;
             happened.push(Happened::Won(words.win.clone()));
+        }
+    }
+
+    /// Starts the scripts effects asked for and runs them all for `dt` seconds; what their
+    /// effects do goes into `outcome` as a trigger's would.
+    fn run_scripts(
+        &mut self,
+        dt: f32,
+        places: &impl Places,
+        words: &Words,
+        outcome: &mut Outcome,
+        happened: &mut Vec<Happened>,
+    ) {
+        let mut scripts = std::mem::take(&mut self.scripts);
+        scripts.extend(outcome.scripts.drain(..).map(script::Running::new));
+        if scripts.is_empty() {
+            return;
+        }
+        let mut stage = PlayStage {
+            play: self,
+            places,
+            words,
+            outcome,
+            happened,
+            said: Vec::new(),
+        };
+        scripts.retain_mut(|s| s.step(dt, &mut stage));
+        // Scripts started by scripts begin next frame.
+        let started = std::mem::take(&mut stage.outcome.scripts);
+        self.scripts = scripts;
+        self.scripts
+            .extend(started.into_iter().map(script::Running::new));
+    }
+
+    /// Who the name means and where it stands now: a scene node, or the player by
+    /// [`clockwork_core::script::PLAYER`].
+    fn whereabouts(&self, name: &str, places: &impl Places) -> Option<(Mover, Vec3)> {
+        if name == clockwork_core::script::PLAYER {
+            return Some((Mover::Player, self.avatar.position()));
+        }
+        let id = self.entities.named(name)?;
+        let at = self.moved.get(&id).copied().or_else(|| places.find(name))?;
+        Some((Mover::Node(id), at))
+    }
+
+    /// Puts a node or the player at `at`, a node's behaviors with it.
+    fn put(&mut self, who: Mover, at: Vec3) {
+        match who {
+            Mover::Node(id) => {
+                self.moved.insert(id, at);
+                self.entities.move_node(id, at);
+            }
+            Mover::Player => self.avatar.teleport(at),
         }
     }
 
@@ -844,6 +919,94 @@ fn apply_effect(
             for effect in effects {
                 apply_effect(effect, entities, fighter, places, outcome, happened, words);
             }
+        }
+        Effect::Run(script) => outcome.scripts.push(*script),
+    }
+}
+
+/// What a script moves.
+#[derive(Clone, Copy)]
+enum Mover {
+    Player,
+    Node(NodeId),
+}
+
+/// What scripts act on while Play runs them.
+struct PlayStage<'a, P: Places> {
+    play: &'a mut Play,
+    places: &'a P,
+    words: &'a Words,
+    outcome: &'a mut Outcome,
+    happened: &'a mut Vec<Happened>,
+    /// Problems already said, so a waiting script doesn't repeat them every frame.
+    said: Vec<String>,
+}
+
+impl<P: Places> PlayStage<'_, P> {
+    fn missing(&mut self, name: &str) {
+        script::Stage::problem(
+            self,
+            format!("A script names \"{name}\", which isn't in the scene"),
+        );
+    }
+}
+
+impl<P: Places> script::Stage for PlayStage<'_, P> {
+    fn holds(&self, condition: &entities::Condition) -> bool {
+        let inventory = self.play.fighter.inventory.as_ref();
+        self.play
+            .entities
+            .holds(condition, &|item| inventory.map_or(0, |i| i.count(item)))
+    }
+
+    fn effect(&mut self, effect: Effect) {
+        let play = &mut *self.play;
+        apply_effect(
+            effect,
+            &mut play.entities,
+            &mut play.fighter,
+            self.places,
+            self.outcome,
+            self.happened,
+            self.words,
+        );
+    }
+
+    fn walk(&mut self, node: &str, to: &str, distance: f32) -> bool {
+        let Some((id, here)) = self.play.whereabouts(node, self.places) else {
+            self.missing(node);
+            return true;
+        };
+        let Some((_, goal)) = self.play.whereabouts(to, self.places) else {
+            self.missing(to);
+            return true;
+        };
+        let gap = goal - here;
+        let there = gap.length() <= distance;
+        let at = if there {
+            goal
+        } else {
+            here + gap.normalize_or_zero() * distance
+        };
+        self.play.put(id, at);
+        there
+    }
+
+    fn place(&mut self, node: &str, to: &str) {
+        match (
+            self.play.whereabouts(node, self.places),
+            self.play.whereabouts(to, self.places),
+        ) {
+            (Some((id, _)), Some((_, goal))) => self.play.put(id, goal),
+            (None, _) => self.missing(node),
+            (_, None) => self.missing(to),
+        }
+    }
+
+    fn problem(&mut self, text: String) {
+        if !self.said.contains(&text) {
+            self.said.push(text.clone());
+            self.happened.push(Happened::Problem(text));
         }
     }
 }

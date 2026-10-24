@@ -473,8 +473,29 @@ pub fn play_system(
     state.workshop.hud = fights.then(|| played.fighter.hud());
     state.workshop.health = Some((played.vitals.health, played.vitals.max));
 
-    // Actors where they went, showing their state's animation.
+    // Nodes scripts moved, where they are now.
     state.workshop.acting.clear();
+    for (&node, &at) in &played.moved {
+        if node == played.node {
+            continue;
+        }
+        state.workshop.acting.insert(node);
+        if let Some(entity) = view.entity(node)
+            && let Ok(mut transform) = transforms.get_mut(entity)
+        {
+            let parent = state
+                .workshop
+                .scene
+                .get(node)
+                .and_then(|n| n.parent)
+                .and_then(|p| view.entity(p))
+                .and_then(|e| parents.get(e).ok())
+                .map(|g| g.affine())
+                .unwrap_or_default();
+            transform.translation = parent.inverse().transform_point3(at);
+        }
+    }
+    // Actors where they went, showing their state's animation.
     for pose in played.entities.poses() {
         if pose.node == played.node {
             continue;

@@ -749,6 +749,28 @@ Not yet: layers that scroll on their own (moving clouds, waterfalls by offset), 
 animation (colors cycling instead of tiles), per-layer blending and window effects, and
 hardware tile animation without rendering each frame's whole map.
 
+### 7.10.4 Scripts (implemented)
+
+What a game does over time rather than at once (cutscenes, a boss's entrance, an NPC walking
+up to talk, a door that opens after a lever and a pause) is a **script**
+(`clockwork_core::script`): commands of plain data, so the agent translates a game's event
+scripts into commands rather than code.
+
+- **Commands:** `Do` (any trigger effect), `Wait`, `Until` (a condition), `Walk` and `Place`
+  (a node or the player to where another stands), `Hold` (the player can't move or act), `If`,
+  `Repeat` and `End`. `hold_player` holds the player until the script ends.
+- **Runtime:** the effect `Run` starts one, from a trigger, an actor's state or another script;
+  several run at once. `clockwork_runtime::play::script` keeps each one's place and runs it at
+  Play's pace (time left over from a wait goes to the next command). Effects go into the frame's
+  outcome like a trigger's; moved nodes take their behaviors along and are reported in
+  `Play::moved`. A script that runs 1000 commands in a frame without waiting is stopped.
+- **Checks:** Repeats that never wait and walks that never arrive are problems, and the nodes a
+  script names are checked like teleports.
+- **Editor:** the Inspector edits a script's commands as RON; Play moves the nodes it walks.
+
+Not yet: camera commands, choices in dialogs, scripts as their own assets, and walking around
+walls (walks are straight lines).
+
 ### 7.11 Abilities and composition plugins (implemented)
 
 Moves go from one character to another, across games and between 2D and 3D:

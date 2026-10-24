@@ -28,6 +28,7 @@ pub mod platform;
 pub mod recipe;
 pub mod recipe_schema;
 pub mod save;
+pub mod script;
 pub mod sound;
 pub mod sprite;
 pub mod surface;

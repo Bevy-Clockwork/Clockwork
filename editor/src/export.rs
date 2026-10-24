@@ -94,6 +94,11 @@ fn effect_assets(effect: &Effect, wanted: &mut Vec<OutputRef>) {
                 effect_assets(effect, wanted);
             }
         }
+        Effect::Run(script) => {
+            for effect in script.effects() {
+                effect_assets(effect, wanted);
+            }
+        }
         _ => {}
     }
 }

@@ -79,6 +79,9 @@ pub fn scene_names(
                 teleports(effect, &mut |to| {
                     wanted.push((to.to_string(), format!("a teleport of \"{from}\"")))
                 });
+                script_problems(effect, &mut |problem| {
+                    problems.insert(format!("a script of \"{from}\": {problem}"));
+                });
             }
             Behavior::Actor(actor) => {
                 for problem in actor.problems() {
@@ -131,10 +134,33 @@ pub fn scene_names(
     problems.into_iter().collect()
 }
 
+/// The nodes an effect leads to by name: teleports, and the nodes its scripts walk and place.
 fn teleports(effect: &Effect, found: &mut dyn FnMut(&str)) {
     match effect {
         Effect::Teleport(to) => found(to),
         Effect::All(effects) => effects.iter().for_each(|e| teleports(e, found)),
+        Effect::Run(script) => {
+            script.nodes().into_iter().for_each(&mut *found);
+            script
+                .effects()
+                .into_iter()
+                .for_each(|e| teleports(e, found));
+        }
+        _ => {}
+    }
+}
+
+/// What is wrong with the scripts an effect runs.
+fn script_problems(effect: &Effect, found: &mut dyn FnMut(String)) {
+    match effect {
+        Effect::All(effects) => effects.iter().for_each(|e| script_problems(e, found)),
+        Effect::Run(script) => {
+            script.problems().into_iter().for_each(&mut *found);
+            script
+                .effects()
+                .into_iter()
+                .for_each(|e| script_problems(e, found));
+        }
         _ => {}
     }
 }

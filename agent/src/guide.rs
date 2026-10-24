@@ -467,7 +467,20 @@ Behavior(id: "octorok", behavior: Actor((
     `Hurt`, `HealthBelow(h)`, `Arrived` (a wander point, home or a patrol's end), `Blocked` (a
     wall or hole stopped it), `Chance(per_second)`, `When(condition)`, `Not`, `All`, `Any`.
     Actors without `health` can't be beaten; beaten actors count for `DestroyAll`. Transitions
-    to states the actor doesn't have are reported when the plugin is saved. A scene node has a
+    to states the actor doesn't have are reported when the plugin is saved.
+
+What happens over time rather than at once (a cutscene, a boss's entrance, an NPC walking up to
+talk, a door that opens a moment after a lever) is a script, started by the effect `Run`:
+`Trigger(radius: 1.0, once: true, effect: Run((hold_player: true, steps: [Walk(node: "Guard",
+to: "player", speed: 2.0), Do(Say((speaker: Some("Guard"), pages: ["Halt!"]))),
+Wait(0.5), Until(Flag("lever")), Do(Set("gate_open"))])))`. Commands: `Do(effect)` (any
+effect, at once; the game waits while a dialog is open), `Wait(seconds)`, `Until(condition)`,
+`Walk(node, to, speed)` (in a straight line to where node `to` stands, `"player"` for the
+player either way; its behaviors go with it), `Place(node, to)` (at once), `Hold(bool)` (the
+player can't move or act), `If(when, then: [...], otherwise: [...])`, `Repeat(times:
+Some(n), steps: [...])` (forever without `times`; it must wait somewhere) and `End`.
+`hold_player` holds the player until the script ends. Translate a game's event scripts (its
+cutscene commands, its timers) into these, not into new code. A scene node has a
 list of behaviors, each working only while its condition holds, and can appear only once one
 does: conditions are `Has(item, count)`, `Flag("name")`, `Gone("node name")` (destroyed or
 picked up), `Act(n)` (the current act is n), `Not(...)`, `All([...])` and `Any([...])`.

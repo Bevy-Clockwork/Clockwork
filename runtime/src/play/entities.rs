@@ -154,6 +154,8 @@ pub struct Entities {
     memo: HashSet<(u64, NodeId)>,
     /// What actors did on entering a state, for the next [`Entities::touch`].
     pending: Vec<Touch>,
+    /// Every placed node by name, with or without behaviors: what scripts can move.
+    names: Vec<(NodeId, String)>,
 }
 
 /// The facts conditions are judged by: the entities' flags and gone nodes, and what the player
@@ -187,7 +189,9 @@ impl Entities {
     pub fn build(placed: impl IntoIterator<Item = Placed>) -> Self {
         let mut live = Vec::new();
         let mut nodes = Vec::new();
+        let mut names = Vec::new();
         for n in placed {
+            names.push((n.id, n.name.clone()));
             if n.behaviors.is_empty() && n.appears.is_none() && n.acts.is_none() {
                 continue;
             }
@@ -231,6 +235,22 @@ impl Entities {
             act: None,
             memo: HashSet::new(),
             pending: Vec::new(),
+            names,
+        }
+    }
+
+    /// The placed node of this name (the first, if several share it).
+    pub fn named(&self, name: &str) -> Option<NodeId> {
+        self.names
+            .iter()
+            .find(|(_, n)| n == name)
+            .map(|(id, _)| *id)
+    }
+
+    /// Moves a node's behaviors to `at`, as a script walks or places it.
+    pub fn move_node(&mut self, node: NodeId, at: Vec3) {
+        for e in self.live.iter_mut().filter(|e| e.node == node) {
+            e.at = at;
         }
     }
 

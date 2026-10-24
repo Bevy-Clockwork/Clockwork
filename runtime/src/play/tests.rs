@@ -339,3 +339,64 @@ fn beating_every_actor_wins_a_destroy_all_game() {
     let happened = walk(&mut play, &map, &nowhere, Vec2::ZERO, STEP);
     assert!(matches!(happened.last(), Some(Happened::Won(_))));
 }
+
+#[test]
+fn a_trigger_runs_a_cutscene_that_holds_the_player_and_walks_a_guard() {
+    let map = floor();
+    let cutscene: Effect = ron::from_str(
+        r#"Run((hold_player: true, steps: [
+            Walk(node: "Guard", to: "Gate", speed: 2.0),
+            Do(Message("Halt!")),
+            Wait(0.5),
+            Do(Set("talked")),
+        ]))"#,
+    )
+    .unwrap();
+    let nodes = vec![
+        placed(
+            2,
+            "Plate",
+            Vec3::new(0.5, 0.0, 0.0),
+            vec![Behavior::Trigger {
+                radius: 0.5,
+                effect: cutscene,
+                once: true,
+            }],
+        ),
+        placed(
+            3,
+            "Guard",
+            Vec3::new(4.0, 0.0, 0.0),
+            vec![Behavior::Solid { radius: 0.4 }],
+        ),
+        placed(4, "Gate", Vec3::new(4.0, 0.0, 2.0), vec![]),
+    ];
+    let places = |name: &str| match name {
+        "Gate" => Some(Vec3::new(4.0, 0.0, 2.0)),
+        "Guard" => Some(Vec3::new(4.0, 0.0, 0.0)),
+        _ => None,
+    };
+    let mut play = play(nodes, Rules::default());
+    // Stepping on the plate starts the cutscene; the player stops there however it pushes.
+    walk(&mut play, &map, &places, Vec2::X, 0.1);
+    assert!(play.held());
+    let stopped = play.position();
+    let happened = walk(&mut play, &map, &places, Vec2::X, 0.5);
+    assert_eq!(play.position(), stopped);
+    // Two meters at two meters a second: the guard is at the gate after a second.
+    assert!(!happened.contains(&Happened::Notice("Halt!".into())));
+    let happened = walk(&mut play, &map, &places, Vec2::X, 0.6);
+    assert!(happened.contains(&Happened::Notice("Halt!".into())));
+    assert_eq!(play.moved.get(&3), Some(&Vec3::new(4.0, 0.0, 2.0)));
+    assert!(
+        play.entities
+            .live
+            .iter()
+            .any(|e| e.node == 3 && e.at.z == 2.0)
+    );
+    walk(&mut play, &map, &places, Vec2::X, 0.6);
+    assert!(play.entities.flags.contains("talked"));
+    assert!(!play.held(), "the cutscene ended");
+    walk(&mut play, &map, &places, Vec2::X, 0.3);
+    assert!(play.position().x > stopped.x, "the player walks again");
+}

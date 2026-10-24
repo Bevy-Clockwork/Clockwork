@@ -4,6 +4,10 @@
 
 ### Added
 
+- Scripts: the effect `Run` starts commands that run over time (`Do`, `Wait`, `Until`, `Walk`,
+  `Place`, `Hold`, `If`, `Repeat`, `End`), for cutscenes and events. A script can hold the
+  player still, and nodes it walks take their behaviors along. The Inspector edits scripts, and
+  content checks report scripts that never wait or name nodes that don't exist.
 - `Music` recipe output: an m4a song (the music engine most GBA games use), rendered with its
   instruments and looped where it loops. Games play music from the start (the `music` game
   setting) and change it with the `Music` effect. The agent's `find_songs` tool finds a ROM's

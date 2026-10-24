@@ -76,6 +76,8 @@ pub enum Effect {
     Clear(String),
     /// Does each of these, in order.
     All(Vec<Effect>),
+    /// Starts a script: commands run one after another over time (see [`crate::script`]).
+    Run(Box<crate::script::Script>),
 }
 
 /// Something true or not while playing: what the player carries, flags effects raise, nodes

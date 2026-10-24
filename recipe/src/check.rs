@@ -51,6 +51,20 @@ pub fn check(index: &AssetIndex, plugin: Option<&str>) -> Vec<Problem> {
                 message,
             }));
         }
+        if let Some(Output::Behavior {
+            behavior:
+                Slot::Inline(clockwork_core::behavior::Behavior::Trigger {
+                    effect: clockwork_core::behavior::Effect::Run(script),
+                    ..
+                }),
+            ..
+        }) = asset.output
+        {
+            problems.extend(script.problems().into_iter().map(|message| Problem {
+                at: asset.at.clone(),
+                message: format!("its script: {message}"),
+            }));
+        }
         // An area's animated tiles and layers have timing and scroll that work.
         if let Some(Output::Image { layers, frames, .. }) = asset.output {
             let problems_here = (frames.iter().filter_map(|f| f.problem()))
