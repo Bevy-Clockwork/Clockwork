@@ -2124,6 +2124,7 @@ mod tests {
         let mut state = EditorState {
             library: Default::default(),
             missing: Vec::new(),
+            imports: Default::default(),
             selected: None,
             search: String::new(),
             agent_prompt: String::new(),

@@ -77,6 +77,8 @@ pub enum Command {
     SetField(String, String, String, String),
     /// Opens the command palette with this text typed in.
     Palette(String),
+    /// Imports game files and folders into the Library, in the background as a drop does.
+    Import(Vec<PathBuf>),
     /// Opens the plugin editor on a plugin (by name).
     PluginEditor(String),
     /// Changes, finds in, saves, undoes … the graph of the plugin shown:
@@ -438,6 +440,7 @@ fn run(
                     item.clone(),
                 ));
         }
+        Command::Import(paths) => state.import(paths.iter().cloned()),
         Command::PluginEditor(name) => {
             state.screen = Screen::Plugins;
             state.plugin_editor.selected = Some(name.clone());

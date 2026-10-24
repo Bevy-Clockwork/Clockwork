@@ -10,6 +10,7 @@ pub mod files;
 pub mod store;
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use clockwork_core::{Platform, RomInfo};
 use sha1::{Digest, Sha1};
@@ -110,8 +111,88 @@ fn read_rom_matching(path: &Path, accepts: impl Fn(&[u8]) -> bool) -> Result<Vec
 
 #[derive(Default)]
 pub struct Library {
-    platforms: Vec<Box<dyn Platform>>,
+    platforms: Vec<Arc<dyn Platform>>,
     entries: Vec<LibraryEntry>,
+}
+
+/// Reads and identifies game files without the [`Library`], e.g. on another thread; the
+/// entries it makes are added with [`Library::add`].
+#[derive(Clone)]
+pub struct Identifier {
+    platforms: Vec<Arc<dyn Platform>>,
+}
+
+impl Identifier {
+    /// Reads a game file (see [`read_rom_file`]) and identifies it.
+    pub fn read(&self, path: &Path) -> Result<LibraryEntry, ImportError> {
+        let rom = read_rom_matching(path, |rom| {
+            self.platforms.iter().any(|p| p.identify(rom).is_some())
+        })?;
+        self.identify(path.to_path_buf(), &rom)
+    }
+
+    /// Identifies a game from its bytes: its platform, header and canonical hash.
+    pub fn identify(&self, path: PathBuf, rom: &[u8]) -> Result<LibraryEntry, ImportError> {
+        let (platform, mut info) = self
+            .platforms
+            .iter()
+            .find_map(|p| p.identify(rom).map(|info| (p, info)))
+            .ok_or_else(|| ImportError::UnknownPlatform(path.clone()))?;
+        if info.title.is_empty() {
+            info.title = path
+                .file_stem()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "Untitled game".into());
+        }
+        let sha1 = match platform.canonicalize(rom) {
+            Some(canonical) => sha1_hex(&canonical),
+            None => sha1_hex(rom),
+        };
+        Ok(LibraryEntry {
+            path,
+            sha1,
+            size: rom.len() as u64,
+            info,
+        })
+    }
+}
+
+/// The game files in a folder and the folders in it: files with a game extension or `.zip`,
+/// leaving out the `.bin` files of folders that have a cue sheet (the sheet stands for them).
+/// Hidden files and folders are skipped.
+pub fn scan_folder(dir: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut folders = vec![dir.to_path_buf()];
+    while let Some(folder) = folders.pop() {
+        let Ok(read) = std::fs::read_dir(&folder) else {
+            continue;
+        };
+        let mut files = Vec::new();
+        for entry in read.flatten() {
+            let path = entry.path();
+            if entry.file_name().to_string_lossy().starts_with('.') {
+                continue;
+            }
+            match entry.file_type() {
+                Ok(t) if t.is_dir() => folders.push(path),
+                Ok(t) if t.is_file() => files.push(path),
+                _ => {}
+            }
+        }
+        let extension = |p: &PathBuf| {
+            p.extension()
+                .map(|e| e.to_string_lossy().to_ascii_lowercase())
+                .unwrap_or_default()
+        };
+        let has_cue = files.iter().any(|f| extension(f) == "cue");
+        files.retain(|f| {
+            let ext = extension(f);
+            (ext == "zip" || ROM_EXTENSIONS.contains(&ext.as_str())) && !(has_cue && ext == "bin")
+        });
+        files.sort();
+        found.extend(files);
+    }
+    found
 }
 
 impl Library {
@@ -120,7 +201,7 @@ impl Library {
     }
 
     pub fn with_platform(mut self, platform: impl Platform + 'static) -> Self {
-        self.platforms.push(Box::new(platform));
+        self.platforms.push(Arc::new(platform));
         self
     }
 
@@ -129,8 +210,25 @@ impl Library {
         mut self,
         platforms: impl IntoIterator<Item = Box<dyn Platform>>,
     ) -> Self {
-        self.platforms.extend(platforms);
+        self.platforms.extend(platforms.into_iter().map(Arc::from));
         self
+    }
+
+    /// Something that reads and identifies files as this library does, for another thread.
+    pub fn identifier(&self) -> Identifier {
+        Identifier {
+            platforms: self.platforms.clone(),
+        }
+    }
+
+    /// Adds an entry made by an [`Identifier`]; one of the same game (by hash) already here is
+    /// kept instead. Returns its index and whether it is new.
+    pub fn add(&mut self, entry: LibraryEntry) -> (usize, bool) {
+        if let Some(i) = self.entries.iter().position(|e| e.sha1 == entry.sha1) {
+            return (i, false);
+        }
+        self.entries.push(entry);
+        (self.entries.len() - 1, true)
     }
 
     pub fn entries(&self) -> &[LibraryEntry] {
@@ -138,11 +236,9 @@ impl Library {
     }
 
     pub fn import(&mut self, path: impl AsRef<Path>) -> Result<&LibraryEntry, ImportError> {
-        let path = path.as_ref();
-        let rom = read_rom_matching(path, |rom| {
-            self.platforms.iter().any(|p| p.identify(rom).is_some())
-        })?;
-        self.import_bytes(path.to_path_buf(), &rom)
+        let entry = self.identifier().read(path.as_ref())?;
+        let (i, _) = self.add(entry);
+        Ok(&self.entries[i])
     }
 
     /// Reads an entry's ROM in its platform's canonical form, ready for recipes.
@@ -161,32 +257,9 @@ impl Library {
         path: PathBuf,
         rom: &[u8],
     ) -> Result<&LibraryEntry, ImportError> {
-        let (platform, mut info) = self
-            .platforms
-            .iter()
-            .find_map(|p| p.identify(rom).map(|info| (p, info)))
-            .ok_or_else(|| ImportError::UnknownPlatform(path.clone()))?;
-        if info.title.is_empty() {
-            info.title = path
-                .file_stem()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "Untitled game".into());
-        }
-        let sha1 = match platform.canonicalize(rom) {
-            Some(canonical) => sha1_hex(&canonical),
-            None => sha1_hex(rom),
-        };
-
-        if let Some(i) = self.entries.iter().position(|e| e.sha1 == sha1) {
-            return Ok(&self.entries[i]);
-        }
-        self.entries.push(LibraryEntry {
-            path,
-            sha1,
-            size: rom.len() as u64,
-            info,
-        });
-        Ok(self.entries.last().unwrap())
+        let entry = self.identifier().identify(path, rom)?;
+        let (i, _) = self.add(entry);
+        Ok(&self.entries[i])
     }
 
     pub fn remove(&mut self, index: usize) -> Option<LibraryEntry> {
@@ -352,6 +425,47 @@ mod tests {
         let reread = third.import_game(&known).unwrap();
         assert_eq!(reread.sha1, sha1_hex(&rom));
         assert_eq!(reread.size, rom.len() as u64);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_folder_scan_finds_game_files_and_leaves_out_what_a_cue_sheet_stands_for() {
+        let dir = std::env::temp_dir().join(format!("clockwork-scan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for file in [
+            "a.gba",
+            "notes.txt",
+            "sub/b.Z64",
+            "sub/c.zip",
+            "disc/game.cue",
+            "disc/game.bin",
+            ".hidden/d.gba",
+            "loose/e.bin",
+        ] {
+            let path = dir.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"").unwrap();
+        }
+        let mut found: Vec<String> = scan_folder(&dir)
+            .iter()
+            .map(|p| {
+                p.strip_prefix(&dir)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect();
+        found.sort();
+        assert_eq!(
+            found,
+            [
+                "a.gba",
+                "disc/game.cue",
+                "loose/e.bin",
+                "sub/b.Z64",
+                "sub/c.zip"
+            ]
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -18,6 +18,7 @@ use crate::{
 pub enum AppCommand {
     Go(Screen),
     ImportRoms,
+    ImportFolder,
     ExportGame,
     Undo,
     Redo,
@@ -106,6 +107,12 @@ fn entries(state: &EditorState) -> Vec<Entry> {
             AppCommand::Go(Screen::Settings),
         ),
         e("File", "Import games…", "Ctrl+O", AppCommand::ImportRoms),
+        e(
+            "File",
+            "Import a folder of games…",
+            "",
+            AppCommand::ImportFolder,
+        ),
         e("File", "Export game…", "Ctrl+E", AppCommand::ExportGame),
         e("File", "Rescan plugins", "", AppCommand::RescanPlugins),
         e("Edit", "Undo", "Ctrl+Z", AppCommand::Undo),
