@@ -181,6 +181,12 @@ GbaObjectFrames(tiles: "gfx", bank: "obj", objects: "lists", layout: Oam, frames
     A field is `size` bytes (U8, U16, U32, little-endian) at byte `at`, shifted right by `shift`,
     keeping `bits` bits (0: all), two's complement with `signed`. Shape 0 is square, 1 wide,
     2 tall; size 0..3 grows (8x8 .. 64x64 for squares).
+    Games whose frame records hold (object count, first object, first palette) instead of
+    counted lists: `counts: Some(<table>)` gives each frame's object count (lists are then
+    only objects), `list_unit: 8` turns object numbers into byte offsets (the object size),
+    and `palettes: Some((buffer: "pals", first: <table>))` gives each frame its own palettes:
+    an object's palette p is palette (first + p) of the buffer, as games that load a frame's
+    palettes when they draw it do (more palettes than the 16 slots of a bank).
 KeyframeAnimation(from: "rom_low", name: "walk_south", at: Pointer(table: 0x1000, index: 6, base: 0x08000000),
     layout: (stride: 4, frame: (at: 0), ticks: (at: 1), end: (at: 3, shift: 7, bits: 1),
              after_end: RewindByte), fps: 59.7275, into: "hero")
@@ -190,6 +196,11 @@ KeyframeAnimation(from: "rom_low", name: "walk_south", at: Pointer(table: 0x1000
     pointer table (little-endian u32, minus `base`). after_end: Stop (hold the last keyframe),
     Restart, or RewindByte (the byte after the last record says how many keyframes to go back;
     0 stops). Read the buffer first, e.g. the ROM region holding the tables.
+    Games that keep each animation's length in a directory instead of an end flag:
+    at: Directory(table: 0x0, index: 37, stride: 4, count: (at: 0, size: U16),
+                  first: (at: 2, size: U16), keys: 0x7D60)
+    record `index` of the directory gives the keyframe count and the first keyframe's number
+    (keyframes numbered from offset `keys`); the count ends the list and `end` is not read.
 
 ## Outputs
 

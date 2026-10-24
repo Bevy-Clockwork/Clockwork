@@ -381,7 +381,7 @@ pub const STEPS: &[VariantInfo] = &[
             f(
                 "at",
                 Structure,
-                "Where the keyframes start: Offset(…) or Pointer(…)",
+                "Where the keyframes start: Offset(…), Pointer(…) or Directory(…)",
             ),
             f("layout", Structure, "How a keyframe is stored"),
             f("fps", Number, "Ticks per second the durations count in"),
