@@ -669,7 +669,11 @@ Moves go from one character to another, across games and between 2D and 3D:
 - **Composition plugins** (`clockwork_core::compose`, `compose.ron` instead of `recipe.ron`;
   manifest game `composition`, no hashes) hold only references and choices: a character
   (`base`: another plugin's model or sprite output), the abilities it learns with their role
-  bindings, movement tuning (speed, jump) and the hand bone. `clockwork_recipe::compose` turns
+  bindings, movement tuning (speed, jump), the hand bone and **parts**: assets used in place of
+  the base character's (`parts: {"stats": (plugin: "rpg", output: "tough")}`; the slots are
+  `PART_SLOTS`: stats, camera, inventory, HUD, UI, input map and sounds). Parts are names put in
+  the character's slots, found when it plays like those its own plugin writes.
+  `clockwork_recipe::compose` turns
   one into an ordinary extraction: the sprites learned moves show (held items, projectiles,
   icons) are copied in under `"<plugin>/<output>"` and references renamed, so everything that
   shows or plays outputs works unchanged. The editor extracts the plugins it uses first; the
@@ -689,13 +693,16 @@ A **Plugins** screen next to the Workshop (`editor/src/plugin_editor.rs`), follo
 screen's layout (plugins on the left, the selected one on the right):
 
 - **Compositions** are edited as a **node graph** (`editor/src/compose_graph.rs`, drawn with
-  `egui-snarl`). Three kinds of wire: *character* (a playable character of any extracted plugin),
-  *ability* (any plugin's ability) and *learned*. A **Learn** node takes an ability and holds what
+  `egui-snarl`). Four kinds of wire: *character* (a playable character of any extracted plugin),
+  *ability* (any plugin's ability), *learned*, and an *asset* of a kind a part takes (any
+  plugin's or a built-in one: stats, a camera, items, a HUD, …). A **Learn** node takes an ability and holds what
   plays for each of its roles ("Not chosen", "The ability's own pose", or any animation of the
   character it is wired into) and whether unchosen roles use the ability's own poses (follows the
   wiring, on for a character from the ability's own plugin, until set by hand). A **character of
-  this plugin** node takes a base on its first input and learned abilities on the inputs after it
-  (one free input always waits for the next), with its name, speed, jump height and hand bone.
+  this plugin** node takes a base on its first input, then one input per part ("its own" until an
+  asset of that kind is wired in), then learned abilities (one free input always waits for the
+  next), with its name, speed, jump height and hand bone. **Part from…** in the canvas menu, or a
+  wire dragged from a part input, adds an asset node.
   Right-click the canvas to add nodes, drag a wire into empty space to add a node already wired
   (from a Learn input, an ability; from a character's free input, an ability and its Learn node),
   right-click a node to remove it (or press Delete for the selected nodes) or place its

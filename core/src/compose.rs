@@ -45,6 +45,27 @@ pub struct ComposedCharacter {
     /// The bone held things are drawn at, for 3D characters whose plugin names none.
     #[serde(default)]
     pub hand: Option<String>,
+    /// Assets it uses in place of its base character's, by slot (see [`PART_SLOTS`]):
+    /// `{"stats": (plugin: "rpg", output: "tough")}`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub parts: BTreeMap<String, OutputRef>,
+}
+
+/// The slots of a composed character that can take another asset in place of its base
+/// character's, and the kind of asset ([`crate::recipe::Output::name`]) each takes.
+pub const PART_SLOTS: &[(&str, &str)] = &[
+    ("stats", "Stats"),
+    ("camera", "Camera"),
+    ("inventory", "Items"),
+    ("hud", "Hud"),
+    ("ui", "Ui"),
+    ("input", "InputMap"),
+    ("sounds", "Sounds"),
+];
+
+/// The kind of asset a part slot takes.
+pub fn part_kind(slot: &str) -> Option<&'static str> {
+    PART_SLOTS.iter().find(|(s, _)| *s == slot).map(|(_, k)| *k)
 }
 
 /// An ability a composed character learns, and what plays for each of its roles.

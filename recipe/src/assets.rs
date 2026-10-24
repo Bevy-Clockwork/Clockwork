@@ -3,6 +3,7 @@
 
 use clockwork_core::{
     asset::{self, AssetId, AssetSource, BUILTIN, OutputRef, Use},
+    compose::PART_SLOTS,
     recipe::{Kind, Output, Recipe},
 };
 
@@ -48,6 +49,13 @@ impl<'a> AssetIndex<'a> {
                 uses.extend(character.abilities.iter().map(|a| Use {
                     slot: "ability",
                     asset: a.ability.clone(),
+                }));
+                uses.extend(character.parts.iter().filter_map(|(slot, at)| {
+                    let (slot, _) = PART_SLOTS.iter().find(|(s, _)| s == slot)?;
+                    Some(Use {
+                        slot,
+                        asset: at.clone(),
+                    })
                 }));
                 assets.push(Asset {
                     at: OutputRef::new(name, &character.id),
