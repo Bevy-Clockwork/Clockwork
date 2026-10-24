@@ -33,8 +33,8 @@ impl Workspace {
         let stored = store::load();
         let mut library = Library::new().with_platforms(clockwork_platforms::all());
         let mut problems = Vec::new();
-        for path in &stored.roms {
-            if let Err(e) = library.import_known(path, &stored.known) {
+        for game in &stored.games {
+            if let Err(e) = library.import_game(game) {
                 problems.push(e.to_string());
             }
         }
@@ -63,14 +63,14 @@ impl Workspace {
     }
 
     pub fn title(&self, entry: &LibraryEntry) -> String {
-        match self.stored.names.get(&entry.sha1) {
+        match self.stored.game(&entry.sha1).and_then(|g| g.name.as_ref()) {
             Some(name) => display_name(name),
             None => entry.info.title.clone(),
         }
     }
 
     pub fn decomp(&self, entry: &LibraryEntry) -> Option<String> {
-        self.stored.decomps.get(&entry.sha1).cloned()
+        self.stored.game(&entry.sha1).and_then(|g| g.decomp.clone())
     }
 
     /// Finds a game by SHA-1 (or a prefix of it) or by part of its name.

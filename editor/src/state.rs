@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use bevy::prelude::*;
-use clockwork_library::{Library, LibraryEntry, boxart::display_name};
+use clockwork_library::{Game, Library, LibraryEntry, boxart::display_name};
 use clockwork_recipe::Plugin;
 
 use crate::scene::{ItemRef, NodeId, Scene};
@@ -33,11 +33,10 @@ pub enum Screen {
 #[derive(Resource)]
 pub struct EditorState {
     pub library: Library,
-    /// Remembered ROMs that couldn't be read this run (a drive not plugged in, a moved file).
-    /// They stay in the saved Library, so they come back once they can be read again.
-    pub missing_roms: Vec<PathBuf>,
-    /// What the saved Library remembered about each ROM file, kept for the missing ones.
-    pub known_roms: Vec<clockwork_library::KnownRom>,
+    /// Remembered games whose file couldn't be read this run (a drive not plugged in, a moved
+    /// file). They stay in the saved Library, so they come back once they can be read again,
+    /// or once the user locates their file.
+    pub missing: Vec<Game>,
     pub selected: Option<usize>,
     pub search: String,
     pub agent_prompt: String,
@@ -361,16 +360,23 @@ impl EditorState {
         let (stored, problem) = store::load_reporting();
         let mut state = Self {
             library: Library::new().with_platforms(clockwork_platforms::all()),
-            missing_roms: Vec::new(),
-            known_roms: Vec::new(),
+            missing: Vec::new(),
             selected: None,
             search: String::new(),
             agent_prompt: String::new(),
             screen: Screen::default(),
             log: Vec::new(),
             fetch_box_art: stored.fetch_box_art,
-            names: stored.names,
-            decomps: stored.decomps,
+            names: stored
+                .games
+                .iter()
+                .filter_map(|g| Some((g.sha1.clone(), g.name.clone()?)))
+                .collect(),
+            decomps: stored
+                .games
+                .iter()
+                .filter_map(|g| Some((g.sha1.clone(), g.decomp.clone()?)))
+                .collect(),
             decomp_input: String::new(),
             boxart_retry: Vec::new(),
             boxart_busy: false,
@@ -396,18 +402,17 @@ impl EditorState {
                 format!("The scene could not be loaded: {problem}"),
             );
         }
-        for path in stored.roms {
-            if let Err(e) = state.library.import_known(&path, &stored.known) {
+        for game in &stored.games {
+            if let Err(e) = state.library.import_game(game) {
                 state.log(
                     LogLevel::Warn,
                     format!("Could not reload ROM (it stays in the Library): {e}"),
                 );
-                state.missing_roms.push(path);
+                state.missing.push(game.clone());
             }
         }
-        state.known_roms = stored.known;
         // Remember what was just read, so the next start can skip it.
-        if state.known_to_save() != state.known_roms {
+        if state.games_to_save() != stored.games {
             state.save();
         }
         state.log(
@@ -495,9 +500,11 @@ impl EditorState {
             let before = self.library.entries().len();
             match self.library.import(&path) {
                 Ok(entry) => {
-                    let title = entry.info.title.clone();
-                    if let Some(i) = self.missing_roms.iter().position(|p| *p == path) {
-                        self.missing_roms.remove(i);
+                    let (title, sha1) = (entry.info.title.clone(), entry.sha1.clone());
+                    // A missing game is found: at its old place, or as the same game elsewhere.
+                    let found = |g: &Game| g.path == path || (!g.sha1.is_empty() && g.sha1 == sha1);
+                    if self.missing.iter().any(found) {
+                        self.missing.retain(|g| !found(g));
                         changed = true;
                     }
                     if self.library.entries().len() > before {
@@ -542,51 +549,92 @@ impl EditorState {
         }
     }
 
-    /// The ROM paths to save: every Library entry, then the ones that couldn't be read this run.
-    pub fn remembered_roms(&self) -> Vec<PathBuf> {
-        remembered_roms(self.library.entries(), &self.missing_roms)
+    /// The title of a missing game: its full name, its header's title or its file's name.
+    pub fn missing_title(&self, game: &Game) -> String {
+        match (
+            self.names.get(&game.sha1).or(game.name.as_ref()),
+            &game.title,
+        ) {
+            (Some(name), _) => display_name(name),
+            (None, title) if !title.is_empty() => title.clone(),
+            _ => game
+                .path
+                .file_name()
+                .map_or("Untitled".into(), |n| n.to_string_lossy().into_owned()),
+        }
     }
 
-    /// What to remember about each ROM file: fresh for the Library's entries, as last saved for
-    /// the missing ones.
-    fn known_to_save(&self) -> Vec<clockwork_library::KnownRom> {
-        let mut known: Vec<_> = self
-            .library
-            .entries()
-            .iter()
-            .filter_map(|e| self.library.known(e))
-            .collect();
-        known.extend(
-            self.known_roms
-                .iter()
-                .filter(|k| self.missing_roms.contains(&k.path))
-                .cloned(),
-        );
-        known
+    /// Looks for a missing game at another file. A file of another game is imported too, and
+    /// the missing one stays missing.
+    pub fn locate(&mut self, index: usize, path: PathBuf) {
+        let Some(game) = self.missing.get(index).cloned() else {
+            return;
+        };
+        let title = self.missing_title(&game);
+        let found = self.library.import(&path).map(|e| e.sha1.clone());
+        match found {
+            Ok(sha1) if game.sha1.is_empty() || sha1 == game.sha1 => {
+                self.missing.remove(index);
+                self.log(LogLevel::Info, format!("Found {title}"));
+            }
+            Ok(_) => self.log(
+                LogLevel::Warn,
+                format!("That file is another game: it is in the Library now, and {title} is still missing"),
+            ),
+            Err(e) => self.log(LogLevel::Error, e.to_string()),
+        }
+        self.save();
+    }
+
+    /// Forgets a missing game.
+    pub fn forget_missing(&mut self, index: usize) {
+        if index < self.missing.len() {
+            let game = self.missing.remove(index);
+            let title = self.missing_title(&game);
+            self.log(LogLevel::Info, format!("Forgot {title}"));
+            self.save();
+        }
+    }
+
+    /// The Library's records: every entry, then the missing games.
+    fn games_to_save(&self) -> Vec<Game> {
+        games_to_save(&self.library, &self.missing, &self.names, &self.decomps)
     }
 
     pub fn save(&mut self) {
-        let stored = store::Stored {
-            roms: self.remembered_roms(),
-            fetch_box_art: self.fetch_box_art,
-            names: self.names.clone(),
-            decomps: self.decomps.clone(),
-            known: self.known_to_save(),
-        };
+        let stored = store::Stored::new(self.games_to_save(), self.fetch_box_art);
         if let Err(e) = store::save(&stored) {
             self.log(LogLevel::Error, format!("Could not save the Library: {e}"));
         }
     }
 }
 
-fn remembered_roms(entries: &[LibraryEntry], missing: &[PathBuf]) -> Vec<PathBuf> {
-    let mut roms: Vec<PathBuf> = entries.iter().map(|e| e.path.clone()).collect();
-    for path in missing {
-        if !roms.contains(path) {
-            roms.push(path.clone());
+/// A record for each Library entry, with its name and decomp, then each missing game not found
+/// since (by path or hash).
+fn games_to_save(
+    library: &Library,
+    missing: &[Game],
+    names: &BTreeMap<String, String>,
+    decomps: &BTreeMap<String, String>,
+) -> Vec<Game> {
+    let mut games: Vec<Game> = library.entries().iter().map(|e| library.game(e)).collect();
+    for game in missing {
+        let found = games
+            .iter()
+            .any(|g| g.path == game.path || (!game.sha1.is_empty() && g.sha1 == game.sha1));
+        if !found {
+            games.push(game.clone());
         }
     }
-    roms
+    for game in &mut games {
+        if let Some(name) = names.get(&game.sha1) {
+            game.name = Some(name.clone());
+        }
+        if let Some(decomp) = decomps.get(&game.sha1) {
+            game.decomp = Some(decomp.clone());
+        }
+    }
+    games
 }
 
 #[cfg(test)]
@@ -607,16 +655,19 @@ mod tests {
         library
             .import_bytes(PathBuf::from("here.gba"), &rom)
             .expect("a valid GBA header");
-        let missing = [
-            PathBuf::from("unplugged/drive.gba"),
-            PathBuf::from("here.gba"),
-        ];
-        assert_eq!(
-            remembered_roms(library.entries(), &missing),
-            [
-                PathBuf::from("here.gba"),
-                PathBuf::from("unplugged/drive.gba")
-            ]
-        );
+        let mut unplugged = Game::at(PathBuf::from("unplugged/drive.gba"));
+        unplugged.sha1 = "beef".into();
+        unplugged.name = Some("Unplugged (USA)".into());
+        let missing = [unplugged.clone(), Game::at(PathBuf::from("here.gba"))];
+        let sha1 = library.entries()[0].sha1.clone();
+        let names = BTreeMap::from([(sha1.clone(), "Here (USA)".to_string())]);
+        let decomps = BTreeMap::from([(sha1, "https://example.com/here".to_string())]);
+        let games = games_to_save(&library, &missing, &names, &decomps);
+        assert_eq!(games.len(), 2);
+        assert_eq!(games[0].path, PathBuf::from("here.gba"));
+        assert_eq!(games[0].name.as_deref(), Some("Here (USA)"));
+        assert_eq!(games[0].decomp.as_deref(), Some("https://example.com/here"));
+        // A missing game keeps what it was, name and all.
+        assert_eq!(games[1], unplugged);
     }
 }
