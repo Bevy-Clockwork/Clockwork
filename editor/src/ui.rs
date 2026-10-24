@@ -61,6 +61,8 @@ struct Actions {
     pick_cover: Option<String>,
     reset_cover: Option<String>,
     remove: Option<usize>,
+    /// Mark or unmark a game (by SHA-1) as a favourite.
+    favourite: Option<String>,
     /// Find a missing game's file (by where it was).
     locate: Option<PathBuf>,
     /// Export the scene as a game, with this title.
@@ -83,6 +85,7 @@ enum LibrarySort {
     Added,
     Title,
     Platform,
+    Used,
 }
 
 /// The Library's view options.
@@ -92,6 +95,19 @@ pub struct LibraryView {
     sort: LibrarySort,
     /// Only games of this platform, if set.
     platform: Option<&'static str>,
+    /// Only favourites, games with plugins, games with a decompilation.
+    favourites: bool,
+    with_plugins: bool,
+    with_decomp: bool,
+}
+
+impl LibraryView {
+    fn filters(&self) -> usize {
+        [self.favourites, self.with_plugins, self.with_decomp]
+            .iter()
+            .filter(|f| **f)
+            .count()
+    }
 }
 
 /// The parts of the window every screen shares: palette, toasts and Library view options.
@@ -345,6 +361,9 @@ pub fn editor_ui(
     }
     if let Some(i) = actions.remove {
         state.remove(i);
+    }
+    if let Some(sha1) = actions.favourite {
+        state.edit_notes(&sha1, |n| n.favourite = !n.favourite);
     }
 
     set_viewport(&mut camera, &window, viewport, ctx.pixels_per_point());
@@ -1187,13 +1206,31 @@ fn library_toolbar(
                                 LibrarySort::Added => "Added",
                                 LibrarySort::Title => "Title",
                                 LibrarySort::Platform => "Platform",
+                                LibrarySort::Used => "Last used",
                             }
                         ))
                         .show_ui(ui, |ui| {
                             ui.selectable_value(&mut view.sort, LibrarySort::Added, "Added");
                             ui.selectable_value(&mut view.sort, LibrarySort::Title, "Title");
                             ui.selectable_value(&mut view.sort, LibrarySort::Platform, "Platform");
+                            ui.selectable_value(&mut view.sort, LibrarySort::Used, "Last used");
                         });
+                    let label = match view.filters() {
+                        0 => "Filter".to_string(),
+                        n => format!("Filter ({n})"),
+                    };
+                    ui.menu_button(label, |ui| {
+                        ui.checkbox(&mut view.favourites, "★  Favourites");
+                        ui.checkbox(&mut view.with_plugins, "Has plugins");
+                        ui.checkbox(&mut view.with_decomp, "Has a decompilation");
+                        if view.filters() > 0 && ui.button("Show every game").clicked() {
+                            view.favourites = false;
+                            view.with_plugins = false;
+                            view.with_decomp = false;
+                        }
+                    })
+                    .response
+                    .on_hover_text("Show only some games");
                     kit::search_field(ui, &mut state.search, "Search games…", 220.0);
                 });
             });
@@ -1214,10 +1251,18 @@ fn visible_games(state: &EditorState, view: &LibraryView) -> Vec<usize> {
         .iter()
         .enumerate()
         .filter(|(_, e)| view.platform.is_none_or(|p| e.info.platform == p))
+        .filter(|(_, e)| !view.favourites || state.notes(&e.sha1).favourite)
+        .filter(|(_, e)| !view.with_plugins || plugin_count(state, &e.sha1) > 0)
+        .filter(|(_, e)| !view.with_decomp || state.decomps.contains_key(&e.sha1))
         .filter(|(_, e)| {
             query.is_empty()
                 || state.title(e).to_lowercase().contains(&query)
                 || e.info.game_code.to_lowercase().contains(&query)
+                || state
+                    .notes(&e.sha1)
+                    .tags
+                    .iter()
+                    .any(|t| t.to_lowercase().contains(&query))
         })
         .map(|(i, _)| i)
         .collect();
@@ -1233,8 +1278,37 @@ fn visible_games(state: &EditorState, view: &LibraryView) -> Vec<usize> {
                 state.title(&entries[i]).to_lowercase(),
             )
         }),
+        // Most recently used first; games never used keep their order, after them.
+        LibrarySort::Used => {
+            visible.sort_by_key(|&i| std::cmp::Reverse(state.notes(&entries[i].sha1).used))
+        }
     }
     visible
+}
+
+/// How many installed plugins are made for a game.
+fn plugin_count(state: &EditorState, sha1: &str) -> usize {
+    state
+        .workshop
+        .plugins
+        .iter()
+        .filter(|p| p.manifest.supports_rom(sha1))
+        .count()
+}
+
+/// "today", "yesterday", "3 days ago", "2 months ago": how long ago a time (in seconds since
+/// 1970) was, from `now`.
+fn ago(then: u64, now: u64) -> String {
+    let days = now.saturating_sub(then) / 86_400;
+    match days {
+        0 => "today".into(),
+        1 => "yesterday".into(),
+        2..=30 => format!("{days} days ago"),
+        31..=59 => "a month ago".into(),
+        60..=364 => format!("{} months ago", days / 30),
+        365..=729 => "a year ago".into(),
+        _ => format!("{} years ago", days / 365),
+    }
 }
 
 /// Arrow keys move the selection through the visible games; Escape clears it.
@@ -1262,7 +1336,15 @@ fn library_keys(ui: &egui::Ui, state: &mut EditorState, visible: &[usize]) {
 }
 
 /// What a game card's right-click menu offers.
-fn game_menu(ui: &mut egui::Ui, sha1: &str, index: usize, actions: &mut Actions) {
+fn game_menu(ui: &mut egui::Ui, sha1: &str, index: usize, favourite: bool, actions: &mut Actions) {
+    let label = if favourite {
+        "Remove from favourites"
+    } else {
+        "★  Add to favourites"
+    };
+    if ui.button(label).clicked() {
+        actions.favourite = Some(sha1.to_string());
+    }
     if ui.button("Set cover art…").clicked() {
         actions.pick_cover = Some(sha1.to_string());
     }
@@ -1366,6 +1448,28 @@ fn shelves(
                 theme::BRASS_DIM
             };
             theme::riveted_frame(painter, cover, frame);
+            let favourite = state.notes(&entry.sha1).favourite;
+            if favourite {
+                painter.text(
+                    cover.left_top() + vec2(8.0, 6.0),
+                    egui::Align2::LEFT_TOP,
+                    "★",
+                    egui::FontId::proportional(16.0),
+                    theme::BRASS_BRIGHT,
+                );
+            }
+            let plugins = plugin_count(state, &entry.sha1);
+            if plugins > 0 {
+                let at = cover.right_top() + vec2(-14.0, 14.0);
+                painter.circle_filled(at, 9.0, theme::BRASS);
+                painter.text(
+                    at,
+                    egui::Align2::CENTER_CENTER,
+                    plugins.to_string(),
+                    theme::strong(11.0),
+                    theme::BG_DEEP,
+                );
+            }
 
             let title_rect = egui::Rect::from_min_size(
                 egui::pos2(card.left(), plank.bottom() + 4.0),
@@ -1390,7 +1494,11 @@ fn shelves(
                 theme::PARCHMENT_DIM,
             );
 
-            let title = state.title(entry);
+            let title = match plugins {
+                0 => state.title(entry),
+                1 => format!("{}\n1 plugin", state.title(entry)),
+                n => format!("{}\n{n} plugins", state.title(entry)),
+            };
             let response = response
                 .on_hover_cursor(egui::CursorIcon::PointingHand)
                 .on_hover_text(title);
@@ -1398,7 +1506,7 @@ fn shelves(
                 state.selected = Some(index);
             }
             let sha1 = entry.sha1.clone();
-            response.context_menu(|ui| game_menu(ui, &sha1, index, actions));
+            response.context_menu(|ui| game_menu(ui, &sha1, index, favourite, actions));
         }
         ui.add_space(6.0);
     }
@@ -1465,18 +1573,18 @@ fn game_list(ui: &mut egui::Ui, state: &mut EditorState, visible: &[usize], acti
             Color32::TRANSPARENT
         };
         ui.painter().rect_filled(rect, 3.0, fill);
-        let plugins = state
-            .workshop
-            .plugins
-            .iter()
-            .filter(|p| p.manifest.supports_rom(&entry.sha1))
-            .count();
+        let plugins = plugin_count(state, &entry.sha1);
+        let favourite = state.notes(&entry.sha1).favourite;
         cells(
             ui,
             rect,
             [
                 (
-                    state.title(&entry),
+                    if favourite {
+                        format!("★ {}", state.title(&entry))
+                    } else {
+                        state.title(&entry)
+                    },
                     if selected {
                         theme::BRASS_BRIGHT
                     } else {
@@ -1503,7 +1611,7 @@ fn game_list(ui: &mut egui::Ui, state: &mut EditorState, visible: &[usize], acti
         if response.clicked() {
             state.selected = Some(index);
         }
-        response.context_menu(|ui| game_menu(ui, &entry.sha1, index, actions));
+        response.context_menu(|ui| game_menu(ui, &entry.sha1, index, favourite, actions));
     }
 }
 
@@ -1558,6 +1666,7 @@ fn details_panel(
     let Some(index) = state.selected else { return };
     let entry = state.library.entries()[index].clone();
     let texture = covers.get(ui.ctx(), &entry.sha1);
+    let notes = state.notes(&entry.sha1);
 
     let mut close = false;
     kit::panel_header(ui, "Details", |ui| {
@@ -1615,6 +1724,15 @@ fn details_panel(
                 ui.add_space(8.0);
 
                 ui.horizontal_wrapped(|ui| {
+                    let star = if notes.favourite { "★" } else { "☆" };
+                    let tip = if notes.favourite {
+                        "Remove from favourites"
+                    } else {
+                        "Add to favourites"
+                    };
+                    if kit::icon_button(ui, star, tip).clicked() {
+                        actions.favourite = Some(entry.sha1.clone());
+                    }
                     if ui.button("🖼  Set cover…").clicked() {
                         actions.pick_cover = Some(entry.sha1.clone());
                     }
@@ -1635,9 +1753,11 @@ fn details_panel(
                         state.boxart_retry.push(entry.sha1.clone());
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.menu_button("⋯", |ui| game_menu(ui, &entry.sha1, index, actions))
-                            .response
-                            .on_hover_text("More");
+                        ui.menu_button("⋯", |ui| {
+                            game_menu(ui, &entry.sha1, index, notes.favourite, actions)
+                        })
+                        .response
+                        .on_hover_text("More");
                     });
                 });
 
@@ -1667,6 +1787,13 @@ fn details_panel(
                             }
                         });
                         ui.end_row();
+                        let now = clockwork_library::agents::now();
+                        if notes.added > 0 {
+                            info_row(ui, "Added", &ago(notes.added, now));
+                        }
+                        if notes.used > 0 {
+                            info_row(ui, "Last used", &ago(notes.used, now));
+                        }
                         ui.label(kit::dim("Location"));
                         ui.add(
                             egui::Label::new(
@@ -1676,6 +1803,9 @@ fn details_panel(
                         );
                         ui.end_row();
                     });
+
+                kit::section(ui, "Tags");
+                tags_section(ui, state, &entry.sha1, &notes.tags);
 
                 kit::section(ui, "Plugins");
                 let plugins: Vec<String> = state
@@ -1708,6 +1838,44 @@ fn details_panel(
                 extract_section(ui, state, &entry);
             });
         });
+}
+
+/// A game's tags, each removable, and a field to add one. The search finds games by tag.
+fn tags_section(ui: &mut egui::Ui, state: &mut EditorState, sha1: &str, tags: &[String]) {
+    let mut remove = None;
+    ui.horizontal_wrapped(|ui| {
+        for (i, tag) in tags.iter().enumerate() {
+            if ui
+                .small_button(format!("{tag}  ✕"))
+                .on_hover_text("Remove this tag")
+                .clicked()
+            {
+                remove = Some(i);
+            }
+        }
+    });
+    if let Some(i) = remove {
+        state.edit_notes(sha1, |n| {
+            n.tags.remove(i);
+        });
+    }
+    let id = ui.id().with(("new_tag", sha1));
+    let mut text: String = ui.data_mut(|d| d.get_temp(id).unwrap_or_default());
+    let response = ui.add(
+        egui::TextEdit::singleline(&mut text)
+            .hint_text("Add a tag…")
+            .desired_width(ui.available_width()),
+    );
+    let tag = text.trim().to_string();
+    if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && !tag.is_empty() {
+        state.edit_notes(sha1, |n| {
+            if !n.tags.contains(&tag) {
+                n.tags.push(tag);
+            }
+        });
+        text.clear();
+    }
+    ui.data_mut(|d| d.insert_temp(id, text));
 }
 
 /// Describe what to take from a game and hand it to the agent.
@@ -2112,5 +2280,23 @@ pub fn close_system(
         } else {
             state.quit_asked = true;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn times_read_as_how_long_ago() {
+        let day = 86_400;
+        let now = 1000 * day;
+        assert_eq!(ago(now - 60, now), "today");
+        assert_eq!(ago(now - day, now), "yesterday");
+        assert_eq!(ago(now - 5 * day, now), "5 days ago");
+        assert_eq!(ago(now - 90 * day, now), "3 months ago");
+        assert_eq!(ago(now - 800 * day, now), "2 years ago");
+        // A clock set back reads as today, not as the future.
+        assert_eq!(ago(now + day, now), "today");
     }
 }

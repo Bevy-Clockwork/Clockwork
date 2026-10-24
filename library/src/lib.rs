@@ -295,6 +295,30 @@ pub struct Game {
     /// The decompilation repository linked to it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decomp: Option<String>,
+    /// When it was added and last used, and how the user marked it.
+    #[serde(default, skip_serializing_if = "GameNotes::is_empty")]
+    pub notes: GameNotes,
+}
+
+/// What the user's use of a game adds to its record.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct GameNotes {
+    /// When it was added to the Library, in seconds since 1970; 0 if before this was kept.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub added: u64,
+    /// When its ROM was last read for a plugin, in seconds since 1970; 0 if never.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub used: u64,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub favourite: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+}
+
+impl GameNotes {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 fn is_zero(n: &u64) -> bool {
@@ -314,6 +338,7 @@ impl Game {
             file: None,
             name: None,
             decomp: None,
+            notes: GameNotes::default(),
         }
     }
 }
@@ -350,6 +375,7 @@ impl Library {
             file: stamp(&entry.path),
             name: None,
             decomp: None,
+            notes: GameNotes::default(),
         }
     }
 

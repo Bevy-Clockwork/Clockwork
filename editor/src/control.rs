@@ -79,6 +79,8 @@ pub enum Command {
     Palette(String),
     /// Imports game files and folders into the Library, in the background as a drop does.
     Import(Vec<PathBuf>),
+    /// Shows a Library game's details (by title).
+    Game(String),
     /// Opens the plugin editor on a plugin (by name).
     PluginEditor(String),
     /// Changes, finds in, saves, undoes … the graph of the plugin shown:
@@ -441,6 +443,16 @@ fn run(
                 ));
         }
         Command::Import(paths) => state.import(paths.iter().cloned()),
+        Command::Game(title) => {
+            let index = state
+                .library
+                .entries()
+                .iter()
+                .position(|e| state.title(e) == *title)
+                .ok_or_else(|| format!("no game is called {title}"))?;
+            state.screen = Screen::Library;
+            state.selected = Some(index);
+        }
         Command::PluginEditor(name) => {
             state.screen = Screen::Plugins;
             state.plugin_editor.selected = Some(name.clone());
