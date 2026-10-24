@@ -4,6 +4,8 @@
 
 ### Added
 
+- `behaviors` on `Places` steps: more `Behavior` outputs per placement, each picked like
+  `behavior`, so a placed person can talk and block the way, or a chest be solid and open.
 - `params` on the `Text` recipe step: control codes followed by parameter bytes, which are
   skipped, so colour, sound and variable codes no longer decode as letters or end the text.
 - Scripts: the effect `Run` starts commands that run over time (`Do`, `Wait`, `Until`, `Walk`,

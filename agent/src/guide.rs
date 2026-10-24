@@ -242,6 +242,9 @@ Places(from: "rom", at: 0x1234, stride: 16, until: Some((field: (at: 0), values:
     from a Literal of keyframe records) or that start in another state. `behavior:
     Some((by: Some((at: 1)), outputs: {3: "octorok", 7: "moblin"}))` picks, like `item`, the
     `Behavior` output each placement does when played: an enemy's `Actor` by its kind field.
+    `behaviors: [(outputs: {}, other: Some("solid")), (by: ..., outputs: {...})]` adds more,
+    each picked the same way (a person who talks and blocks the way, a chest that is solid
+    and opens); a pick that finds nothing for a record adds nothing.
 MarkPlaces(from: "forest_enemies", width: 64, height: 40, cell_size: 16, origin: (2048, 1024), into: "cells")
     Marks the cells each placement covers with its `code` (a field of its record, or its
     number from 1): a grid for a Surfaces output, so the map shows where enemies, doors and

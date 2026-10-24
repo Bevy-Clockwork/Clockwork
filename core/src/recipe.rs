@@ -287,6 +287,10 @@ pub enum Step {
         /// enemy's actor by its kind field.
         #[serde(default)]
         behavior: Option<Box<PlaceItem>>,
+        /// More `Behavior` outputs each placement does, each picked like `behavior` (a person
+        /// who talks and is solid); a pick that finds none adds nothing.
+        #[serde(default)]
+        behaviors: Vec<PlaceItem>,
         /// What `MarkPlaces` writes into the cells: this field's value, else the record's number
         /// from 1.
         #[serde(default)]
