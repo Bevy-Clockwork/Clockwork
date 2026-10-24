@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use clockwork_core::asset::{self, AssetSource};
 use clockwork_core::image::RgbaImage;
-use clockwork_core::layer::{Frames, FramesSpec, Layer, Layers};
+use clockwork_core::layer::{Frames, FramesSpec, Layer, Layers, Patch, PatchSpec};
 use clockwork_core::manifest::{ManifestError, PluginManifest};
 use clockwork_core::model::Model;
 use clockwork_core::place::{self, Placement, SceneTemplate};
@@ -175,14 +175,26 @@ impl Song {
 
 /// Text from `bytes` starting at `at` up to the `end` byte (or `length` bytes): each byte the
 /// text `codes` gives it, else its character in a run of `runs`, else `other`.
+/// What a game's text bytes mean (see [`Step::Text`]).
+#[derive(Clone, Copy)]
+struct CharMap<'a> {
+    runs: &'a [(u8, String)],
+    codes: &'a std::collections::BTreeMap<u8, String>,
+    params: &'a std::collections::BTreeMap<u8, u8>,
+}
+
 fn decode_text(
     bytes: &[u8],
     at: u32,
-    runs: &[(u8, String)],
-    codes: &std::collections::BTreeMap<u8, String>,
+    map: CharMap<'_>,
     (end, length): (u8, Option<u32>),
     other: Option<&str>,
 ) -> Result<String, String> {
+    let CharMap {
+        runs,
+        codes,
+        params,
+    } = map;
     let mut text = String::new();
     let mut i = at as usize;
     loop {
@@ -194,6 +206,14 @@ fn decode_text(
         };
         if byte == end {
             return Ok(text);
+        }
+        if let Some(&count) = params.get(&byte) {
+            // A control code and its parameters: only the code means something.
+            if let Some(code) = codes.get(&byte) {
+                text.push_str(code);
+            }
+            i += 1 + count as usize;
+            continue;
         }
         if let Some(code) = codes.get(&byte) {
             text.push_str(code);
@@ -489,6 +509,7 @@ fn run_step(step: usize, s: &Step, rom: &[u8], made: &mut Made) -> Result<(), Re
                 at,
                 runs,
                 codes,
+                params,
                 end,
                 length,
                 other,
@@ -497,8 +518,18 @@ fn run_step(step: usize, s: &Step, rom: &[u8], made: &mut Made) -> Result<(), Re
                 let bytes = buffers
                     .get(from.as_str())
                     .ok_or_else(|| unknown("buffer", from))?;
-                let text = decode_text(bytes, *at, runs, codes, (*end, *length), other.as_deref())
-                    .map_err(|message| RecipeError::Decode { step, message })?;
+                let text = decode_text(
+                    bytes,
+                    *at,
+                    CharMap {
+                        runs,
+                        codes,
+                        params,
+                    },
+                    (*end, *length),
+                    other.as_deref(),
+                )
+                .map_err(|message| RecipeError::Decode { step, message })?;
                 buffers.insert(into.clone(), text.into_bytes());
             }
             Step::Canvas {
@@ -687,6 +718,7 @@ fn run_step(step: usize, s: &Step, rom: &[u8], made: &mut Made) -> Result<(), Re
                 door,
                 animation,
                 behavior,
+                behaviors,
                 code,
                 extent,
                 into,
@@ -758,10 +790,13 @@ fn run_step(step: usize, s: &Step, rom: &[u8], made: &mut Made) -> Result<(), Re
                                 })
                                 .transpose()?,
                             animation: animation.as_deref().map(fill).transpose()?,
-                            behavior: behavior
-                                .as_ref()
-                                .and_then(|b| b.pick(record, index))
-                                .map(str::to_string),
+                            behaviors: behavior
+                                .iter()
+                                .map(|b| &**b)
+                                .chain(behaviors)
+                                .filter_map(|b| b.pick(record, index))
+                                .map(str::to_string)
+                                .collect(),
                             code: match code {
                                 Some(field) => {
                                     field.read(record).ok_or_else(|| short("code", index))?
@@ -946,8 +981,11 @@ fn run_step(step: usize, s: &Step, rom: &[u8], made: &mut Made) -> Result<(), Re
 fn area_layers(
     id: &str,
     image: &RgbaImage,
-    specs: &[clockwork_core::layer::LayerSpec],
-    frames: Option<&FramesSpec>,
+    (specs, frames, patches): (
+        &[clockwork_core::layer::LayerSpec],
+        Option<&FramesSpec>,
+        &[PatchSpec],
+    ),
     images: &HashMap<String, RgbaImage>,
 ) -> Result<Layers, RecipeError> {
     let fail = |message: String| RecipeError::Part {
@@ -1000,9 +1038,32 @@ fn area_layers(
             frames,
         });
     }
+    // A patch's frames are all the size of its first, and lie inside the area's image.
+    let mut built = Vec::new();
+    for spec in patches {
+        if let Some(problem) = spec.problem() {
+            return Err(fail(problem));
+        }
+        let first = get(&spec.frames.images[0])?;
+        let (w, h) = (first.width, first.height);
+        let (x, y) = spec.at;
+        if u64::from(x) + u64::from(w) > u64::from(image.width)
+            || u64::from(y) + u64::from(h) > u64::from(image.height)
+        {
+            return Err(fail(format!(
+                "the patch at ({x}, {y}) is {w}×{h}, past the edge of the {}×{} image",
+                image.width, image.height
+            )));
+        }
+        built.push(Patch {
+            at: spec.at,
+            frames: frames_of(&spec.frames, first)?,
+        });
+    }
     Ok(Layers {
         frames: frames.map(|f| frames_of(f, image)).transpose()?,
         layers,
+        patches: built,
     })
 }
 
@@ -1037,14 +1098,16 @@ fn outputs(
                 from,
                 layers,
                 frames,
+                patches,
                 ..
             } => {
                 let image = images
                     .get(from.as_str())
                     .cloned()
                     .ok_or_else(|| RecipeError::UnknownOutput(from.clone()))?;
-                if !layers.is_empty() || frames.is_some() {
-                    let built = area_layers(id, &image, layers, frames.as_ref(), images)?;
+                if !layers.is_empty() || frames.is_some() || !patches.is_empty() {
+                    let specs = (layers.as_slice(), frames.as_ref(), patches.as_slice());
+                    let built = area_layers(id, &image, specs, images)?;
                     extracted.layers.push((id.clone(), built));
                 }
                 extracted.images.push((id.clone(), image));
@@ -1283,17 +1346,16 @@ fn outputs(
                         .iter()
                         .any(|o| matches!(o, Output::Behavior { id, .. } if id == behavior))
                 };
-                if let Some(node) = scene
+                if let Some((node, behavior)) = scene
                     .nodes
                     .iter()
-                    .find(|n| n.behavior.as_deref().is_some_and(|b| !does(b)))
+                    .find_map(|n| n.behaviors.iter().find(|b| !does(b)).map(|b| (n, b)))
                 {
                     return Err(RecipeError::Part {
                         id: id.clone(),
                         message: format!(
                             "node \"{}\" does \"{}\", which is not a Behavior output of this plugin",
-                            node.name,
-                            node.behavior.as_deref().unwrap_or_default()
+                            node.name, behavior
                         ),
                     });
                 }
@@ -1773,8 +1835,11 @@ mod tests {
             decode_text(
                 &[0x02, 0xFF],
                 0,
-                &runs,
-                &Default::default(),
+                CharMap {
+                    runs: &runs,
+                    codes: &Default::default(),
+                    params: &Default::default(),
+                },
                 (0xFF, None),
                 None
             )
@@ -1785,8 +1850,11 @@ mod tests {
             decode_text(
                 &[0x02, 0xFF],
                 0,
-                &runs,
-                &Default::default(),
+                CharMap {
+                    runs: &runs,
+                    codes: &Default::default(),
+                    params: &Default::default(),
+                },
                 (0xFF, None),
                 Some("?")
             )
@@ -1799,13 +1867,36 @@ mod tests {
             decode_text(
                 &[0x00, 0x01, 0x00],
                 0,
-                &runs,
-                &Default::default(),
+                CharMap {
+                    runs: &runs,
+                    codes: &Default::default(),
+                    params: &Default::default(),
+                },
                 (0xFF, Some(2)),
                 None
             )
             .unwrap(),
             "AB"
+        );
+        // Control codes skip their parameters, even ones equal to the end byte; the code means
+        // what `codes` gives it.
+        let letters = vec![(0x41, "AB".to_string())];
+        let codes = [(0x03, "!".to_string())].into_iter().collect();
+        let params = [(0x02, 1), (0x03, 2)].into_iter().collect();
+        assert_eq!(
+            decode_text(
+                &[0x41, 0x02, 0x05, 0x42, 0x03, 0x00, 0x41, 0x41, 0x00],
+                0,
+                CharMap {
+                    runs: &letters,
+                    codes: &codes,
+                    params: &params,
+                },
+                (0x00, None),
+                None
+            )
+            .unwrap(),
+            "AB!A"
         );
     }
 
@@ -2193,6 +2284,8 @@ mod tests {
                            x: (at: 2, size: U16), y: (at: 4, size: U16), origin: (100, 0),
                            item: Some((by: Some((at: 1)), outputs: { 5: "room" })),
                            behavior: Some((by: Some((at: 1)), outputs: { 7: "slime" })),
+                           behaviors: [(outputs: {}, other: Some("solid")),
+                                       (by: Some((at: 1)), outputs: { 5: "slime" })],
                            name: (text: "enemy {} #{index}", fields: [(at: 1)]),
                            animation: Some((text: "frame_{}", fields: [(at: 0)])),
                            group: Some((text: "Room")), code: Some((at: 1)), into: "enemies"),
@@ -2210,6 +2303,7 @@ mod tests {
                     Image(id: "room", from: "room", kind: Some(Area)),
                     Scene(id: "world", from: ["enemies", "doors"]),
                     Behavior(id: "slime", behavior: Actor((radius: 0.4, states: [(name: "idle")]))),
+                    Behavior(id: "solid", behavior: Solid(radius: 0.5)),
                 ],
             )"#,
         )
@@ -2227,8 +2321,10 @@ mod tests {
         assert_eq!(scene.nodes[1].item, None);
         assert_eq!(scene.nodes[0].group.as_deref(), Some("Room"));
         assert_eq!(scene.nodes[0].animation.as_deref(), Some("frame_1"));
-        assert_eq!(scene.nodes[0].behavior, None);
-        assert_eq!(scene.nodes[1].behavior.as_deref(), Some("slime"));
+        // `behavior` first, then each of `behaviors` that picks one for the record.
+        assert_eq!(scene.nodes[0].behaviors, ["solid", "slime"]);
+        assert_eq!(scene.nodes[1].behaviors, ["slime", "solid"]);
+        assert!(scene.nodes[2].behaviors.is_empty());
         // (24 + 100, 8) pixels at 16 per meter.
         assert_eq!(scene.nodes[0].position, [7.75, 0.0, 0.5]);
         assert_eq!(
@@ -2263,6 +2359,43 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(run(&recipe, &[]), Err(RecipeError::Part { .. })));
+    }
+
+    #[test]
+    fn an_area_gets_patches_that_animate_on_their_own() {
+        let recipe = |at: &str, second: u32| -> Recipe {
+            ron::from_str(&format!(
+                r#"Recipe(
+                    steps: [
+                        Canvas(name: "map", width: 64, height: 32),
+                        Canvas(name: "water1", width: 16, height: 8),
+                        Canvas(name: "water2", width: 16, height: {second}),
+                    ],
+                    outputs: [
+                        Image(id: "area", from: "map", kind: Some(Area),
+                              patches: [(at: {at}, frames: (images: ["water1", "water2"],
+                                                           ticks: [12], fps: 60.0))]),
+                    ],
+                )"#
+            ))
+            .unwrap()
+        };
+        let extracted = run(&recipe("(48, 24)", 8), &[]).unwrap();
+        let layers = extracted.layers("area").unwrap();
+        assert!(layers.frames.is_none() && layers.layers.is_empty());
+        assert_eq!(layers.patches.len(), 1);
+        assert_eq!(layers.patches[0].at, (48, 24));
+        assert_eq!(layers.patches[0].size(), (16, 8));
+        assert_eq!(layers.patches[0].frames.images.len(), 2);
+        // Its frames are all one size, and it lies inside the image.
+        let Err(RecipeError::Part { message, .. }) = run(&recipe("(48, 24)", 9), &[]) else {
+            panic!("patch frames of different sizes were taken");
+        };
+        assert!(message.contains("\"water2\" is 16×9"), "{message}");
+        let Err(RecipeError::Part { message, .. }) = run(&recipe("(49, 24)", 8), &[]) else {
+            panic!("a patch past the image's edge was taken");
+        };
+        assert!(message.contains("past the edge"), "{message}");
     }
 
     #[test]

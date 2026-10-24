@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::character::CharacterSpec;
 use crate::character2d::Character2dSpec;
 use crate::item::ItemDef;
-use crate::layer::{FramesSpec, LayerSpec};
+use crate::layer::{FramesSpec, LayerSpec, PatchSpec};
 use crate::model::Blend;
 pub use crate::place::{Extent, Match, PlaceDoor, PlaceItem, Template};
 use crate::surface::{SurfaceExtension, SurfaceProperty};
@@ -113,7 +113,10 @@ pub enum Step {
     /// Decodes text from buffer `from`, starting at byte `at` and stopping at byte `end` (or
     /// after `length` bytes, for text of a fixed size), into buffer `into` (UTF-8). Each byte means the text `codes` gives it, else the character of
     /// a run: `(first, "ABC")` makes `first` "A", `first + 1` "B" and so on. A byte neither
-    /// names is an error, unless `other` says what it means.
+    /// names is an error, unless `other` says what it means. Control codes followed by
+    /// parameter bytes (a colour, a sound, a number) are listed in `params` with how many: the
+    /// parameters are skipped, and the code itself means what `codes` gives it (nothing if it
+    /// gives nothing), so a parameter of 0 doesn't end the text.
     Text {
         from: String,
         #[serde(default)]
@@ -122,6 +125,8 @@ pub enum Step {
         runs: Vec<(u8, String)>,
         #[serde(default)]
         codes: BTreeMap<u8, String>,
+        #[serde(default)]
+        params: BTreeMap<u8, u8>,
         end: u8,
         #[serde(default)]
         length: Option<u32>,
@@ -282,6 +287,10 @@ pub enum Step {
         /// enemy's actor by its kind field.
         #[serde(default)]
         behavior: Option<Box<PlaceItem>>,
+        /// More `Behavior` outputs each placement does, each picked like `behavior` (a person
+        /// who talks and is solid); a pick that finds none adds nothing.
+        #[serde(default)]
+        behaviors: Vec<PlaceItem>,
         /// What `MarkPlaces` writes into the cells: this field's value, else the record's number
         /// from 1.
         #[serde(default)]
@@ -392,7 +401,9 @@ pub struct TriangleLayout {
 
 /// A number inside a fixed-size record: `size` bytes (little-endian) at byte `at`, shifted right
 /// by `shift`, keeping the lowest `bits` bits (0: all of them). With `signed`, the kept bits are
-/// a two's complement number. This describes any packed record layout without code.
+/// a two's complement number. The number is then multiplied by `times` and `plus` is added:
+/// records that keep positions in tiles (`times: 16, plus: 8` is a tile's centre in pixels).
+/// This describes any packed record layout without code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Field {
@@ -405,6 +416,22 @@ pub struct Field {
     pub bits: u8,
     #[serde(default)]
     pub signed: bool,
+    #[serde(default = "times_one", skip_serializing_if = "is_one")]
+    pub times: i64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub plus: i64,
+}
+
+fn times_one() -> i64 {
+    1
+}
+
+fn is_one(value: &i64) -> bool {
+    *value == 1
+}
+
+fn is_zero(value: &i64) -> bool {
+    *value == 0
 }
 
 impl Field {
@@ -415,7 +442,16 @@ impl Field {
             shift: 0,
             bits: 0,
             signed: false,
+            times: 1,
+            plus: 0,
         }
+    }
+
+    /// The field's number scaled: `times` and then `plus` (see [`Field`]).
+    pub const fn scaled(mut self, times: i64, plus: i64) -> Self {
+        self.times = times;
+        self.plus = plus;
+        self
     }
 
     pub const fn bits(mut self, shift: u8, bits: u8) -> Self {
@@ -431,6 +467,12 @@ impl Field {
 
     /// Reads the field from the start of `record`; `None` if the record is too short.
     pub fn read(&self, record: &[u8]) -> Option<i64> {
+        self.read_raw(record)
+            .map(|value| value.saturating_mul(self.times).saturating_add(self.plus))
+    }
+
+    /// The number in the record before `times` and `plus`.
+    fn read_raw(&self, record: &[u8]) -> Option<i64> {
         let start = self.at as usize;
         let bytes = record.get(start..start + self.size.bytes())?;
         let mut raw = 0u64;
@@ -783,8 +825,8 @@ pub enum Codec {
 pub enum Output {
     /// An image the plugin provides, under a stable `id`. `kind` sorts it in the Editor's
     /// content browser; without one it is listed under Other. An area can have `layers` drawn
-    /// with it (backgrounds, foregrounds) and `frames` it cycles through (animated tiles), see
-    /// [`crate::layer`].
+    /// with it (backgrounds, foregrounds), `frames` it cycles through (animated tiles) and
+    /// `patches` of it that animate on their own, see [`crate::layer`].
     Image {
         id: String,
         from: String,
@@ -794,6 +836,8 @@ pub enum Output {
         layers: Vec<LayerSpec>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         frames: Option<FramesSpec>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        patches: Vec<PatchSpec>,
     },
     /// A surface map: `width` cells wide, each `cell_size` native units, built from one or more
     /// grids of codes. Game-specific surfaces are declared in `extensions`.
@@ -1436,10 +1480,15 @@ impl Output {
                 from,
                 layers,
                 frames,
+                patches,
                 ..
             } => {
                 let mut ports = vec![port("from", from, Image, Read)];
                 ports.extend(frame_ports(Vec::new(), frames.as_ref()));
+                for (i, patch) in patches.iter().enumerate() {
+                    let at = vec![Seg::Field("patches"), Seg::Index(i)];
+                    ports.extend(frame_ports(at, Some(&patch.frames)));
+                }
                 for (i, layer) in layers.iter().enumerate() {
                     let at = vec![Seg::Field("layers"), Seg::Index(i)];
                     ports.push(Port {
@@ -1687,6 +1736,28 @@ mod tests {
             Some(0x01FF_C0FF)
         );
         assert_eq!(Field::new(3, FieldSize::U16).read(&record), None);
+    }
+
+    #[test]
+    fn fields_scale_what_they_read() {
+        // A tile position x + y * 64 (here x 5, y 3) becomes each tile's centre in pixels.
+        let record = (5u16 + 3 * 64).to_le_bytes();
+        let x = Field::new(0, FieldSize::U16).bits(0, 6).scaled(16, 8);
+        let y = Field::new(0, FieldSize::U16).bits(6, 6).scaled(16, 8);
+        assert_eq!((x.read(&record), y.read(&record)), (Some(88), Some(56)));
+        // Scaling comes after the sign.
+        assert_eq!(
+            Field::new(0, FieldSize::U8)
+                .signed()
+                .scaled(-2, 1)
+                .read(&[0xFF]),
+            Some(3)
+        );
+        // Written without the defaults, read with them.
+        let text = ron::to_string(&Field::new(4, FieldSize::U8)).unwrap();
+        assert!(!text.contains("times") && !text.contains("plus"), "{text}");
+        let parsed: Field = ron::from_str("(at: 1, times: 16, plus: 8)").unwrap();
+        assert_eq!(parsed, Field::new(1, FieldSize::U8).scaled(16, 8));
     }
 
     #[test]

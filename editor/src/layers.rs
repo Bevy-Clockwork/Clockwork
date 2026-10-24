@@ -20,6 +20,8 @@ use crate::{
 const STEP: f32 = 0.002;
 /// Where layers over sprites start (sprites lie at 0.03, what they hold a little above).
 const OVER_SPRITES: f32 = 0.05;
+/// How far above the area's image its patches lie: under the next layer in draw order.
+const PATCH: f32 = STEP / 2.0;
 
 /// Textures that take turns, and when.
 #[derive(Clone)]
@@ -41,11 +43,22 @@ pub struct BuiltLayer {
     pub height: f32,
 }
 
-/// An area's animation (its still image is the node's own texture) and layers, back to front.
+/// A part of an area that animates on its own: its frames and where it lies.
+#[derive(Clone)]
+pub struct BuiltPatch {
+    pub frames: BuiltFrames,
+    /// Its size, and its top left corner from the area's, in meters.
+    pub size: Vec2,
+    pub at: Vec2,
+}
+
+/// An area's animation (its still image is the node's own texture), layers back to front, and
+/// patches.
 #[derive(Clone)]
 pub struct BuiltLayers {
     pub frames: Option<BuiltFrames>,
     pub layers: Vec<BuiltLayer>,
+    pub patches: Vec<BuiltPatch>,
 }
 
 /// Uploads an area's layer and frame images, `meters_per_pixel` to the meter.
@@ -62,9 +75,23 @@ pub fn build(layers: &Layers, meters_per_pixel: f32, images: &mut Assets<Image>)
             height,
         })
         .collect();
+    let patches = layers
+        .patches
+        .iter()
+        .filter_map(|patch| {
+            let frames = upload_frames(&Some(patch.frames.clone()), false, images)?;
+            let (w, h) = patch.size();
+            Some(BuiltPatch {
+                frames,
+                size: Vec2::new(w as f32, h as f32) * meters_per_pixel,
+                at: Vec2::new(patch.at.0 as f32, patch.at.1 as f32) * meters_per_pixel,
+            })
+        })
+        .collect();
     BuiltLayers {
         frames: area_frames,
         layers: built,
+        patches,
     }
 }
 
@@ -128,6 +155,8 @@ pub struct AreaLayer {
     material: Handle<StandardMaterial>,
     shown: Option<usize>,
     shift: Vec2,
+    /// Where its top left corner is from the area's, in meters (a patch's place).
+    offset: Vec2,
 }
 
 /// Marks the planes of layers (not the area's own image), which clicks go through.
@@ -153,6 +182,7 @@ pub fn animate_area(
             material,
             shown: None,
             shift: Vec2::ZERO,
+            offset: Vec2::ZERO,
         });
     }
 }
@@ -188,6 +218,7 @@ pub fn spawn(
                 material: material.clone(),
                 shown: None,
                 shift: Vec2::ZERO,
+                offset: Vec2::ZERO,
             },
             LayerPlane,
             Mesh3d(meshes.add(Plane3d::default().mesh().size(plane.x, plane.y))),
@@ -199,6 +230,34 @@ pub fn spawn(
                 Vec2::ZERO,
                 layer.height,
             )),
+            ChildOf(parent),
+        ));
+    }
+    // Patches: a plane the size of each, at its place just over the area, swapping its frames.
+    for patch in &built.patches {
+        let material = materials.add(StandardMaterial {
+            base_color_texture: patch.frames.textures.first().cloned(),
+            unlit: true,
+            alpha_mode: AlphaMode::Mask(0.5),
+            ..default()
+        });
+        commands.spawn((
+            AreaLayer {
+                frames: Some(patch.frames.clone()),
+                scroll: Vec2::ONE,
+                wrap: false,
+                size: patch.size,
+                area,
+                height: PATCH,
+                material: material.clone(),
+                shown: None,
+                shift: Vec2::ZERO,
+                offset: patch.at,
+            },
+            LayerPlane,
+            Mesh3d(meshes.add(Plane3d::default().mesh().size(patch.size.x, patch.size.y))),
+            MeshMaterial3d(material),
+            Transform::from_translation(place(false, area, patch.size, patch.at, PATCH)),
             ChildOf(parent),
         ));
     }
@@ -250,7 +309,8 @@ pub fn layers_system(
             continue;
         }
         if shift != layer.shift {
-            transform.translation = place(layer.wrap, layer.area, layer.size, shift, layer.height);
+            let at = shift + layer.offset;
+            transform.translation = place(layer.wrap, layer.area, layer.size, at, layer.height);
         }
         let texture = shown
             .zip(layer.frames.as_ref())
@@ -289,6 +349,7 @@ mod tests {
     fn layers_lie_in_draw_order_with_foregrounds_above_sprites() {
         let layers = Layers {
             frames: None,
+            patches: Vec::new(),
             layers: vec![
                 layer(-2, false),
                 layer(3, true),
@@ -319,5 +380,11 @@ mod tests {
         assert_eq!(uv.transform_point2(Vec2::ZERO), Vec2::new(-0.25, 0.0));
         assert_eq!(uv.transform_point2(Vec2::ONE), Vec2::new(2.25, 3.0));
         assert_eq!(place(true, area, size, Vec2::ONE, 0.0), Vec3::ZERO);
+        // A patch lies at its place from the area's top left corner, just above the area.
+        assert_eq!(
+            place(false, area, Vec2::new(1.0, 1.0), Vec2::new(2.0, 3.0), PATCH),
+            Vec3::new(-2.5, PATCH, 0.5)
+        );
+        const { assert!(PATCH > 0.0 && PATCH < STEP) };
     }
 }

@@ -247,6 +247,11 @@ pub const STEPS: &[VariantInfo] = &[
                 "Bytes in a row: [(0x0A, \"ABCDEFGH\")] makes 0x0A \"A\", 0x0B \"B\"",
             ),
             d("codes", Structure, "Single bytes: {0xFE: \"\\n\"}"),
+            d(
+                "params",
+                Structure,
+                "Control codes and how many parameter bytes follow them: {0x02: 1}",
+            ),
             f("end", Count, "The byte that ends the text"),
             d("length", Count, "Or how many bytes it is: Some(64)"),
             d(
@@ -454,6 +459,11 @@ pub const STEPS: &[VariantInfo] = &[
                 "Which Behavior output each does when played (an enemy's Actor): (by, outputs, other)",
             ),
             d(
+                "behaviors",
+                Structure,
+                "More Behavior outputs each does, each picked like behavior: [(by, outputs, other)]",
+            ),
+            d(
                 "code",
                 Optional(&STRUCTURE),
                 "The field MarkPlaces writes; the record's number without it",
@@ -505,6 +515,11 @@ pub const OUTPUTS: &[VariantInfo] = &[
                 "frames",
                 Optional(&STRUCTURE),
                 "Images it cycles through (animated tiles): (images, ticks, fps)",
+            ),
+            d(
+                "patches",
+                Structure,
+                "Parts that animate on their own: [(at: (x, y), frames: (images, ticks, fps)), …]",
             ),
         ],
     },

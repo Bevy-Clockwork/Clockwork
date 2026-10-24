@@ -99,6 +99,18 @@ fn layers_summary(layers: &clockwork_core::layer::Layers) -> String {
             }
         };
         let _ = writeln!(out, "{line}");
+        if which.is_none() {
+            for p in &layers.patches {
+                let (w, h) = p.size();
+                let _ = writeln!(
+                    out,
+                    "    patch at ({}, {}): {w}×{h} px{}",
+                    p.at.0,
+                    p.at.1,
+                    frames(&Some(p.frames.clone()))
+                );
+            }
+        }
     }
     out
 }
@@ -654,11 +666,20 @@ mod tests {
                 over_sprites: false,
                 frames: None,
             }],
+            patches: vec![clockwork_core::layer::Patch {
+                at: (32, 16),
+                frames: Frames {
+                    images: vec![RgbaImage::new(48, 16); 4],
+                    ticks: vec![15],
+                    fps: 60.0,
+                },
+            }],
         };
         assert_eq!(
             layers_summary(&layers),
             "  layer 0: 256×256 px, order -1, scroll (0.25, 0.5), wraps\n  \
-             the image itself, 3 frames looping every 1.00 s\n"
+             the image itself, 3 frames looping every 1.00 s\n    \
+             patch at (32, 16): 48×16 px, 4 frames looping every 1.00 s\n"
         );
     }
 

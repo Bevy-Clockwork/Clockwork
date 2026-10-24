@@ -39,6 +39,24 @@ fn blocking<T>(work: impl FnOnce() -> T) -> T {
     }
 }
 
+/// The recipe given in place (`recipe`) or as a file (`recipe_file`), if any: recipes generated
+/// from a game's tables can be too large to send as an argument.
+fn recipe_text(recipe: Option<&str>, file: Option<&str>) -> Result<Option<String>, String> {
+    match (recipe, file) {
+        (Some(_), Some(_)) => Err("Give `recipe` or `recipe_file`, not both".into()),
+        (Some(text), None) => Ok(Some(text.to_string())),
+        (None, Some(path)) => std::fs::read_to_string(path)
+            .map(Some)
+            .map_err(|e| format!("Could not read the recipe file {path}: {e}")),
+        (None, None) => Ok(None),
+    }
+}
+
+/// Like [`recipe_text`], for tools that need one.
+fn required_recipe(recipe: Option<&str>, file: Option<&str>) -> Result<String, String> {
+    recipe_text(recipe, file)?.ok_or_else(|| "Give the `recipe`, or a `recipe_file`".into())
+}
+
 fn reply(result: Result<String, String>) -> ToolResult {
     Ok(match result {
         Ok(text) => CallToolResult::success(vec![ContentBlock::text(text)]),
@@ -162,7 +180,9 @@ pub struct NameArg {
 pub struct RunRecipeArgs {
     pub game: String,
     /// The whole recipe.ron text (see recipe_guide).
-    pub recipe: String,
+    pub recipe: Option<String>,
+    /// Or a recipe.ron file to read it from, for recipes too large to send (generated ones).
+    pub recipe_file: Option<String>,
     /// Return image previews. Default true.
     pub previews: Option<bool>,
     /// Show a surface map on the image it covers instead of the plain previews.
@@ -205,7 +225,9 @@ pub struct SavePluginArgs {
     /// Short id for the game used across plugins, e.g. "my_game".
     pub game_id: String,
     /// The recipe.ron text. It is run first and only saved if it works.
-    pub recipe: String,
+    pub recipe: Option<String>,
+    /// Or a recipe.ron file to read it from, for recipes too large to send (generated ones).
+    pub recipe_file: Option<String>,
     /// Default "0.1.0".
     pub version: Option<String>,
     /// Replace an existing plugin with this name. Default false.
@@ -300,6 +322,8 @@ pub struct PlayTestArgs {
     /// A recipe to try before saving it (the whole recipe.ron text): `plugin`'s, or one that
     /// runs on `game`.
     pub recipe: Option<String>,
+    /// Or a recipe.ron file to read it from, for recipes too large to send (generated ones).
+    pub recipe_file: Option<String>,
     /// The game an unsaved recipe runs on, when it isn't `plugin`'s.
     pub game: Option<String>,
     /// The Scene output to play; default the first.
@@ -502,7 +526,8 @@ impl Clockwork {
                 .map_err(|e| format!("{name}: {e}"))
         };
         let saved = a.plugin.as_deref().map(recipe::find_plugin).transpose()?;
-        let edited = a.recipe.as_deref().map(recipe::parse).transpose()?;
+        let given = recipe_text(a.recipe.as_deref(), a.recipe_file.as_deref())?;
+        let edited = given.as_deref().map(recipe::parse).transpose()?;
         let name = a.plugin.clone().unwrap_or_else(|| "draft".into());
         let owned = clockwork_recipe::assets::OwnedAssets::of(&installed);
         // The played recipe: the one given, else the saved plugin's.
@@ -514,7 +539,7 @@ impl Clockwork {
             }
         };
         let assets = owned.with_recipe(&name, &recipe);
-        let extracted = match (&a.recipe, &a.game, &saved) {
+        let extracted = match (&given, &a.game, &saved) {
             (None, _, Some(plugin)) => plugin.extract(&installed, &rom)?,
             (Some(_), Some(game), _) => {
                 clockwork_recipe::run_in(&recipe, &self.rom_of(game)?, &assets)
@@ -821,7 +846,8 @@ impl Clockwork {
         self.track("run_recipe");
         let a = args.0;
         let result = (|| {
-            let recipe = recipe::parse(&a.recipe)?;
+            let text = required_recipe(a.recipe.as_deref(), a.recipe_file.as_deref())?;
+            let recipe = recipe::parse(&text)?;
             let rom = self.rom_of(&a.game)?;
             recipe::run(&recipe, &rom)
         })();
@@ -938,7 +964,8 @@ impl Clockwork {
         self.track("save_plugin");
         let a = args.0;
         reply((|| {
-            let parsed = recipe::parse(&a.recipe)?;
+            let text = required_recipe(a.recipe.as_deref(), a.recipe_file.as_deref())?;
+            let parsed = recipe::parse(&text)?;
             let entry = self.workspace().find(&a.game)?;
             let rom = self.rom_of(&a.game)?;
             let extracted = recipe::run(&parsed, &rom)?;
@@ -947,7 +974,7 @@ impl Clockwork {
                 &a.game_id,
                 a.version.as_deref().unwrap_or("0.1.0"),
                 &entry,
-                &a.recipe,
+                &text,
                 a.overwrite.unwrap_or(false),
             )?;
             // What it provides, leaving out kinds it has none of.
@@ -1018,6 +1045,29 @@ impl ServerHandler for Clockwork {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recipes_come_in_place_or_from_a_file() {
+        let path =
+            std::env::temp_dir().join(format!("clockwork-recipe-{}.ron", std::process::id()));
+        std::fs::write(&path, "Recipe(steps: [], outputs: [])").unwrap();
+        let file = path.to_str();
+        assert_eq!(
+            recipe_text(None, file).unwrap().as_deref(),
+            Some("Recipe(steps: [], outputs: [])")
+        );
+        assert_eq!(recipe_text(Some("R"), None).unwrap().as_deref(), Some("R"));
+        assert_eq!(recipe_text(None, None).unwrap(), None);
+        assert!(recipe_text(Some("R"), file).is_err(), "not both");
+        assert!(required_recipe(None, None).is_err());
+        let _ = std::fs::remove_file(&path);
+        assert!(recipe_text(None, file).is_err(), "a missing file says so");
+        // Either can be left out of the arguments.
+        let args: RunRecipeArgs =
+            serde_json::from_str(r#"{"game": "x", "recipe_file": "r.ron"}"#).unwrap();
+        assert_eq!(args.recipe_file.as_deref(), Some("r.ron"));
+        assert!(args.recipe.is_none());
+    }
 
     #[test]
     fn parses_numbers() {

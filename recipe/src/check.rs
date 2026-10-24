@@ -79,9 +79,16 @@ pub fn check(index: &AssetIndex, plugin: Option<&str>) -> Vec<Problem> {
             }));
         }
         // An area's animated tiles and layers have timing and scroll that work.
-        if let Some(Output::Image { layers, frames, .. }) = asset.output {
+        if let Some(Output::Image {
+            layers,
+            frames,
+            patches,
+            ..
+        }) = asset.output
+        {
             let problems_here = (frames.iter().filter_map(|f| f.problem()))
-                .chain(layers.iter().filter_map(|l| l.problem()));
+                .chain(layers.iter().filter_map(|l| l.problem()))
+                .chain(patches.iter().filter_map(|p| p.problem()));
             for message in problems_here {
                 problems.push(Problem {
                     at: asset.at.clone(),
