@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use clockwork_core::recipe::Codec;
+use clockwork_recipe::edit;
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -202,6 +203,87 @@ pub struct SavePluginArgs {
     pub version: Option<String>,
     /// Replace an existing plugin with this name. Default false.
     pub overwrite: Option<bool>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct EditPluginArgs {
+    /// Plugin name, from list_plugins.
+    pub name: String,
+    /// The changes, made in order: each sees the recipe the ones before it left (so after
+    /// removing step 3, the step that was 4 is step 3).
+    pub edits: Vec<EditArg>,
+    /// Only run the changed recipe and report; save nothing. Default false.
+    pub dry_run: Option<bool>,
+}
+
+/// One change. Items are written "step 3" or "output 0" (counted from 0); values, steps and
+/// outputs in RON as in recipe.ron.
+#[derive(Deserialize, JsonSchema)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum EditArg {
+    /// Set a field, e.g. value "0x40", "Some(16)" or "\"tiles\"". A field left out is added.
+    Set {
+        item: String,
+        field: String,
+        value: String,
+    },
+    /// Put a step at a place among the steps (last without `at`).
+    InsertStep {
+        at: Option<usize>,
+        step: String,
+    },
+    /// Put an output at a place among the outputs (last without `at`).
+    InsertOutput {
+        at: Option<usize>,
+        output: String,
+    },
+    /// Write a whole step or output anew, keeping its place and note.
+    Replace {
+        item: String,
+        with: String,
+    },
+    Remove {
+        item: String,
+    },
+    /// Move a step or output to another place in its list.
+    Move {
+        item: String,
+        to: usize,
+    },
+    /// The comment lines right above a step or output; "" removes them.
+    Note {
+        item: String,
+        note: String,
+    },
+}
+
+impl EditArg {
+    fn edit(self) -> Result<edit::Edit, String> {
+        Ok(match self {
+            EditArg::Set { item, field, value } => edit::Edit::Set {
+                item: item.parse()?,
+                field,
+                value,
+            },
+            EditArg::InsertStep { at, step } => edit::Edit::InsertStep { at, step },
+            EditArg::InsertOutput { at, output } => edit::Edit::InsertOutput { at, output },
+            EditArg::Replace { item, with } => edit::Edit::Replace {
+                item: item.parse()?,
+                with,
+            },
+            EditArg::Remove { item } => edit::Edit::Remove {
+                item: item.parse()?,
+            },
+            EditArg::Move { item, to } => edit::Edit::Move {
+                item: item.parse()?,
+                to,
+            },
+            EditArg::Note { item, note } => edit::Edit::Note {
+                item: item.parse()?,
+                note,
+            },
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -572,6 +654,48 @@ impl Clockwork {
     }
 
     #[tool(
+        description = "Change a saved plugin's recipe.ron a step at a time: set values, insert, \
+                          replace, move or remove steps and outputs, write notes. Its comments \
+                          and layout stay. The result is run on the plugin's game and saved only \
+                          if it works (or not at all with dry_run)."
+    )]
+    async fn edit_plugin(&self, args: Parameters<EditPluginArgs>) -> ToolResult {
+        self.track("edit_plugin");
+        let a = args.0;
+        reply((|| {
+            let plugin = recipe::find_plugin(&a.name)?;
+            let path = plugin.dir.join("recipe.ron");
+            let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+            let edits = a
+                .edits
+                .into_iter()
+                .map(EditArg::edit)
+                .collect::<Result<Vec<_>, _>>()?;
+            let (changed, parsed) = edit::apply_all(&text, &edits)?;
+            let game = plugin
+                .manifest
+                .source
+                .sha1
+                .iter()
+                .find(|sha1| self.workspace().find(sha1).is_ok())
+                .ok_or("The plugin's game isn't in the Library, so the change can't be run")?
+                .clone();
+            let rom = self.rom_of(&game)?;
+            let extracted = recipe::run(&parsed, &rom)?;
+            let summary = recipe::summary(&extracted);
+            if a.dry_run.unwrap_or(false) {
+                return Ok(format!("Not saved (dry run). It runs:\n{summary}"));
+            }
+            std::fs::write(&path, &changed).map_err(|e| e.to_string())?;
+            Ok(format!(
+                "Saved {} ({} change(s)). The editor loads it by itself.\n{summary}",
+                path.display(),
+                edits.len()
+            ))
+        })())
+    }
+
+    #[tool(
         description = "Save a working recipe as a plugin (clockwork.toml + recipe.ron) in the \
                           plugins folder. The recipe is run first and only saved if it works. \
                           The Workshop shows it after Rescan."
@@ -673,6 +797,39 @@ mod tests {
         assert_eq!(number(" 0X1_000 "), Ok(0x1000));
         assert!(number("").is_err());
         assert!(number("-1").is_err());
+    }
+
+    #[test]
+    fn edits_are_read_from_json() {
+        let args: EditPluginArgs = serde_json::from_str(
+            r#"{"name": "tmc", "edits": [
+                {"op": "set", "item": "step 3", "field": "offset", "value": "0x40"},
+                {"op": "insert_step", "step": "Fill(name: \"pad\", size: 4)"},
+                {"op": "move", "item": "output 1", "to": 0},
+                {"op": "note", "item": "step 0", "note": "From the gfx table"}
+            ]}"#,
+        )
+        .unwrap();
+        let edits: Vec<edit::Edit> = args.edits.into_iter().map(|e| e.edit().unwrap()).collect();
+        assert_eq!(
+            edits[0],
+            edit::Edit::Set {
+                item: edit::Item::Step(3),
+                field: "offset".into(),
+                value: "0x40".into(),
+            }
+        );
+        assert_eq!(
+            edits[2],
+            edit::Edit::Move {
+                item: edit::Item::Output(1),
+                to: 0,
+            }
+        );
+        let bad = EditArg::Remove {
+            item: "stage 2".into(),
+        };
+        assert!(bad.edit().is_err());
     }
 
     #[test]

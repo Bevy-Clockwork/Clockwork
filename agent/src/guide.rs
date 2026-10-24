@@ -23,6 +23,10 @@ headers usually give exact offsets.
 wrong palettes, shuffled tiles or garbage mean an offset or base is wrong. Iterate.
 5. save_plugin once the output looks right. Then add what you learned to the game's knowledge \
 notes so the next extraction is faster (tell the user; you can't write knowledge files).
+6. To change a saved plugin, use edit_plugin with just the changes (set a value, insert, \
+replace, move or remove a step or output, write a step's note) instead of saving the whole \
+recipe again: it keeps the recipe's comments and layout, runs the result and only saves it \
+if it works. Notes (// lines right above a step) are what the user reads in the editor.
 
 Tools for external programs (git, Ghidra, …) live in their own folder; list_external_tools \
 shows what is available.";

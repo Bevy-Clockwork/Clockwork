@@ -323,7 +323,7 @@ packs and existing plugins.
 | ROM | `read_rom` (hex/u16/u32), `search_rom`, `decompress` |
 | Decomp | `decomp_sync` (shallow `git clone` into `<data>/decomps/`), `decomp_list`, `decomp_search` (regex), `decomp_read` |
 | Knowledge | `recipe_guide`, `list_knowledge`, `read_knowledge`, `list_plugins`, `read_plugin` |
-| Results | `run_recipe` (summary + image previews the agent can see), `save_plugin` (runs the recipe first) |
+| Results | `run_recipe` (summary + image previews the agent can see), `save_plugin` (runs the recipe first), `edit_plugin` (changes a saved recipe a step at a time, keeping its comments; runs it first) |
 | External programs | `list_external_tools` |
 
 **External programs** (git, Ghidra, decompilers) live in their own directory, `<data>/tools/`, one
@@ -754,6 +754,10 @@ screen's layout (plugins on the left, the selected one on the right):
   the image's columns, labelled by what their step makes. The names they make get one shared
   number (`tiles_2`, `bank_2`, ...) so a block added twice doesn't clash. Once added they are
   plain steps in `recipe.ron`; open the group to change anything else.
+- **One way to change a recipe's text** (`clockwork_recipe::edit`): set a value, insert,
+  replace, move or remove a step or output, write a note, each keeping the comments and
+  layout around it. The graph's changes and the agent's `edit_plugin` tool both go through it,
+  so the agent can change a big plugin by sending a few changes instead of the whole recipe.
 - Recipes written by the agent are easiest to change where they are explained: the Inspector's
   first field is a step's **note**, the `//` lines right above it (up to a blank line or a
   section header), edited as text and written back as comments (`Doc::note`, `Doc::with_note`).

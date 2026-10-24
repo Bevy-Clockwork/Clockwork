@@ -27,7 +27,7 @@ use clockwork_core::{
     recipe_schema::{self, FieldInfo, FieldType, VariantInfo},
 };
 use clockwork_recipe::{
-    Made,
+    Made, edit,
     text::{Doc, Kind, Node, format_int_like, parse_int, parse_string, string_literal},
 };
 use egui_snarl::{
@@ -725,18 +725,17 @@ pub enum Edit {
 }
 
 fn node_named(text: &str) -> Result<RNode, String> {
-    let (kind, index) = text
-        .trim()
-        .split_once(' ')
-        .ok_or_else(|| format!("write a node as \"step 3\" or \"output 0\", not \"{text}\""))?;
-    let index: usize = index
-        .trim()
-        .parse()
-        .map_err(|_| format!("\"{index}\" isn't a number"))?;
-    match kind {
-        "step" => Ok(RNode::Step(index)),
-        "output" => Ok(RNode::Output(index)),
-        _ => Err(format!("\"{kind}\" isn't step or output")),
+    Ok(match text.parse::<edit::Item>()? {
+        edit::Item::Step(i) => RNode::Step(i),
+        edit::Item::Output(i) => RNode::Output(i),
+    })
+}
+
+/// The same node, as the shared edits name it.
+fn item(node: RNode) -> edit::Item {
+    match node {
+        RNode::Step(i) => edit::Item::Step(i),
+        RNode::Output(i) => edit::Item::Output(i),
     }
 }
 
@@ -1403,11 +1402,7 @@ impl RecipeGraph {
 
     /// The text of the recipe's node for a step or output.
     fn node_doc(doc: &Doc, node: RNode) -> Option<&Node> {
-        let (list, i) = match node {
-            RNode::Step(i) => ("steps", i),
-            RNode::Output(i) => ("outputs", i),
-        };
-        doc.root.field(list)?.items().get(i)
+        edit::node(doc, item(node))
     }
 
     /// Makes a change; on success it can be undone.
@@ -1615,10 +1610,13 @@ impl RecipeGraph {
                 focus = None;
                 doc.text
             }
-            Change::Note { node, note } => {
-                let item = Self::node_doc(&self.doc, node).ok_or("no such node")?;
-                self.doc.with_note(item, &note)
-            }
+            Change::Note { node, note } => edit::apply(
+                &self.doc,
+                &edit::Edit::Note {
+                    item: item(node),
+                    note,
+                },
+            )?,
             Change::Text(text) => {
                 places = self.places_for(&text);
                 text
@@ -1751,19 +1749,7 @@ impl RecipeGraph {
     /// neighbour at a time so comments on their lines go with them; `places` follow.
     fn moved(&self, node: RNode, to: usize, places: &mut Places) -> Result<String, String> {
         let from = index(node);
-        let mut doc = self.doc.clone();
-        let mut at = from;
-        while at != to {
-            let next = if to > at { at + 1 } else { at - 1 };
-            let (first, second) = (same_list(node, at.min(next)), same_list(node, at.max(next)));
-            let a = Self::node_doc(&doc, first).ok_or("no such node")?;
-            let b = Self::node_doc(&doc, second).ok_or("no such node")?;
-            let text = doc
-                .swapped(a, b)
-                .ok_or("It shares a line with another step in recipe.ron, so it can't move")?;
-            doc = Doc::parse(text).map_err(|e| e.to_string())?;
-            at = next;
-        }
+        let text = edit::moved(&self.doc, item(node), to)?;
         // The nodes stay where they are drawn.
         *places = remap(std::mem::take(places), |n| {
             let i = match (n, node) {
@@ -1783,7 +1769,7 @@ impl RecipeGraph {
                 },
             ))
         });
-        Ok(doc.text)
+        Ok(text)
     }
 
     /// The text with a node's port renamed.
