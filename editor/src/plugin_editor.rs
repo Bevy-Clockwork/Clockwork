@@ -21,9 +21,9 @@ use bevy::prelude::*;
 use bevy_egui::egui::{self, Color32, RichText, vec2};
 use clockwork_core::{
     ability::{Role, RoleBinding},
-    compose::{COMPOSITION_GAME, Composition, OutputRef},
+    compose::{COMPOSITION_GAME, Composition, OutputRef, PART_SLOTS},
 };
-use clockwork_recipe::Plugin;
+use clockwork_recipe::{Plugin, assets::AssetIndex};
 
 use crate::{
     compose_graph::{self, CompositionGraph, Layout},
@@ -229,6 +229,27 @@ pub fn characters(plugins: &[Plugin], extractions: &Extractions) -> Vec<Characte
         }
     }
     out
+}
+
+/// An asset a composed character's part can use.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AssetChoice {
+    pub at: OutputRef,
+    /// Its kind (an output's name), one a part takes.
+    pub kind: &'static str,
+}
+
+/// Every asset of a kind a part takes, built-in ones included.
+pub fn part_assets(plugins: &[Plugin]) -> Vec<AssetChoice> {
+    AssetIndex::build(plugins)
+        .all()
+        .iter()
+        .filter(|a| PART_SLOTS.iter().any(|(_, kind)| *kind == a.kind))
+        .map(|a| AssetChoice {
+            at: a.at.clone(),
+            kind: a.kind,
+        })
+        .collect()
 }
 
 /// Every ability of the extracted plugins.
@@ -1237,6 +1258,7 @@ fn composition_view(
     }
     let characters_available = characters(&state.workshop.plugins, extractions);
     let abilities_available = abilities(&state.workshop.plugins, extractions);
+    let assets_available = part_assets(&state.workshop.plugins);
     let still_extracting = !state.plugin_editor.wanted.is_empty();
     let typing = ui.ctx().egui_wants_keyboard_input();
     let editor = &mut state.plugin_editor;
@@ -1338,6 +1360,7 @@ fn composition_view(
         &name,
         &characters_available,
         &abilities_available,
+        &assets_available,
         !dirty,
     );
     // Arranging a graph that had no saved layout is no change to save.
@@ -1407,6 +1430,14 @@ mod tests {
                     jump: 1.0,
                 },
                 hand: None,
+                parts: [(
+                    "camera".to_string(),
+                    OutputRef {
+                        plugin: "builtin".into(),
+                        output: "top-down".into(),
+                    },
+                )]
+                .into(),
             }],
         };
         save(&plugin_dir, &composition).unwrap();

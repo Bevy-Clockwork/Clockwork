@@ -118,7 +118,7 @@ pub fn data_dir() -> Option<PathBuf> {
     ProjectDirs::from("", "", "Clockwork").map(|dirs| dirs.data_dir().to_path_buf())
 }
 
-fn store_path() -> Option<PathBuf> {
+pub(crate) fn store_path() -> Option<PathBuf> {
     data_dir().map(|dir| dir.join("library.ron"))
 }
 
@@ -129,10 +129,15 @@ pub fn load() -> Stored {
 /// The saved Library, and why it couldn't be read if it couldn't. An unreadable file is set
 /// aside rather than overwritten by the next save (see [`crate::files::load_ron`]).
 pub fn load_reporting() -> (Stored, Option<String>) {
-    let Some(path) = store_path() else {
-        return (Stored::default(), None);
-    };
-    match crate::files::load_ron::<Stored>(&path) {
+    match store_path() {
+        Some(path) => load_at(&path),
+        None => (Stored::default(), None),
+    }
+}
+
+/// The Library saved at `path`, as [`load_reporting`] reads it.
+pub fn load_at(path: &std::path::Path) -> (Stored, Option<String>) {
+    match crate::files::load_ron::<Stored>(path) {
         Ok(stored) => {
             let mut stored = stored.unwrap_or_default();
             stored.migrate();

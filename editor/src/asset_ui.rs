@@ -33,10 +33,11 @@ pub fn asset_section(
     state: &mut EditorState,
     browser: &mut Browser,
     id: &AssetId,
+    extractions: &crate::workshop::Extractions,
 ) {
     let at = &id.at;
-    // Its name and kind, then its fields (which may write its plugin), then what it uses and
-    // what uses it.
+    // Its name and kind, a character's actions, then its fields (which may write its plugin),
+    // then what it uses and what uses it.
     let kind = {
         let index = AssetIndex::build(&state.workshop.plugins);
         let Some(asset) = index.find(id) else {
@@ -50,6 +51,8 @@ pub fn asset_section(
         ui.label(kit::hint(at.to_string()));
         asset.kind
     };
+    // A character's actions come first: their timeline is what is changed most.
+    crate::timeline::actions_section(ui, state, at, kind, extractions);
     let mut editor = std::mem::take(&mut state.workshop.asset_editor);
     crate::asset_edit::fields_section(ui, state, &mut editor, at, kind);
     state.workshop.asset_editor = editor;

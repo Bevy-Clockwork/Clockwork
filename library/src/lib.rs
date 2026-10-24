@@ -4,6 +4,7 @@
 
 pub mod agents;
 pub mod boxart;
+pub mod catalog;
 pub mod content;
 mod cue;
 pub mod files;
@@ -212,6 +213,14 @@ impl Library {
     ) -> Self {
         self.platforms.extend(platforms.into_iter().map(Arc::from));
         self
+    }
+
+    /// A library with the same platforms and no games.
+    pub fn without_games(&self) -> Library {
+        Library {
+            platforms: self.platforms.clone(),
+            entries: Vec::new(),
+        }
     }
 
     /// Something that reads and identifies files as this library does, for another thread.

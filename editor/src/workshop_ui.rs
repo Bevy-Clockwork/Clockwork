@@ -1098,7 +1098,7 @@ fn inspector(
                 {
                     node_inspector(ui, state, id, extractions);
                 } else if let Some(at) = selected_asset(state, browser) {
-                    crate::asset_ui::asset_section(ui, state, browser, &at);
+                    crate::asset_ui::asset_section(ui, state, browser, &at, extractions);
                     if let Some(index) = state.workshop.plugin_index(&at.at.plugin) {
                         ui.add_space(8.0);
                         plugin_inspector(ui, state, index, browser);

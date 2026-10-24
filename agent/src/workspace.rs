@@ -1,19 +1,14 @@
-//! The user's Library as the agent sees it, plus where plugins and knowledge packs live.
+//! The user's Library as the agent sees it (a [`Catalog`] kept current with the editor's
+//! changes), plus where plugins and knowledge packs live.
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use clockwork_library::{Library, LibraryEntry, boxart::display_name, store};
+use clockwork_library::{Library, LibraryEntry, catalog::Catalog};
 use serde::Serialize;
 
 pub struct Workspace {
-    library: Library,
-    stored: store::Stored,
-    /// ROMs in canonical form, by SHA-1, read on first use.
-    roms: HashMap<String, Arc<Vec<u8>>>,
-    /// ROMs that failed to load, with why.
-    pub problems: Vec<String>,
+    catalog: Catalog,
 }
 
 /// A Library game, as reported to the agent.
@@ -30,24 +25,24 @@ pub struct GameInfo {
 
 impl Workspace {
     pub fn load() -> Self {
-        let stored = store::load();
-        let mut library = Library::new().with_platforms(clockwork_platforms::all());
-        let mut problems = Vec::new();
-        for game in &stored.games {
-            if let Err(e) = library.import_game(game) {
-                problems.push(e.to_string());
-            }
-        }
         Self {
-            library,
-            stored,
-            roms: HashMap::new(),
-            problems,
+            catalog: Catalog::load(Library::new().with_platforms(clockwork_platforms::all())),
         }
     }
 
+    /// Picks up what the editor changed in the Library since it was last read (games imported,
+    /// named or forgotten); cheap when nothing changed.
+    pub fn refresh(&mut self) {
+        self.catalog.refresh();
+    }
+
+    /// Games that couldn't be read, with why.
+    pub fn problems(&self) -> &[String] {
+        &self.catalog.problems
+    }
+
     pub fn games(&self) -> Vec<GameInfo> {
-        self.library
+        self.catalog
             .entries()
             .iter()
             .map(|e| GameInfo {
@@ -63,52 +58,21 @@ impl Workspace {
     }
 
     pub fn title(&self, entry: &LibraryEntry) -> String {
-        match self.stored.game(&entry.sha1).and_then(|g| g.name.as_ref()) {
-            Some(name) => display_name(name),
-            None => entry.info.title.clone(),
-        }
+        self.catalog.title(entry)
     }
 
     pub fn decomp(&self, entry: &LibraryEntry) -> Option<String> {
-        self.stored.game(&entry.sha1).and_then(|g| g.decomp.clone())
+        self.catalog.decomp(entry)
     }
 
     /// Finds a game by SHA-1 (or a prefix of it) or by part of its name.
     pub fn find(&self, query: &str) -> Result<LibraryEntry, String> {
-        let q = query.trim().to_lowercase();
-        if q.is_empty() {
-            return Err("Name a game (SHA-1 or part of its name); see list_games".into());
-        }
-        let matches: Vec<&LibraryEntry> = self
-            .library
-            .entries()
-            .iter()
-            .filter(|e| e.sha1.starts_with(&q) || self.title(e).to_lowercase().contains(&q))
-            .collect();
-        match matches.as_slice() {
-            [entry] => Ok((*entry).clone()),
-            [] => Err(format!(
-                "No game in the Library matches \"{query}\"; see list_games"
-            )),
-            many => Err(format!(
-                "\"{query}\" matches {} games ({}); use the SHA-1",
-                many.len(),
-                many.iter()
-                    .map(|e| self.title(e))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )),
-        }
+        self.catalog.find(query)
     }
 
     /// The game's ROM in canonical form (cached).
     pub fn rom(&mut self, entry: &LibraryEntry) -> Result<Arc<Vec<u8>>, String> {
-        if let Some(rom) = self.roms.get(&entry.sha1) {
-            return Ok(rom.clone());
-        }
-        let rom = Arc::new(self.library.rom_bytes(entry).map_err(|e| e.to_string())?);
-        self.roms.insert(entry.sha1.clone(), rom.clone());
-        Ok(rom)
+        self.catalog.rom(entry)
     }
 }
 

@@ -8,9 +8,12 @@
 
 use clockwork_core::ability::Ability;
 use clockwork_core::action::{Moves, Projectile};
+use clockwork_core::asset::Slot;
 use clockwork_core::character2d::Directional;
-use clockwork_core::compose::{ComposedCharacter, Composition, OutputRef};
+use clockwork_core::compose::{ComposedCharacter, Composition, OutputRef, part_kind};
 use clockwork_core::item::{Icon, ItemDef};
+use clockwork_core::parts::Stats;
+use clockwork_core::ui::Kit;
 
 use crate::{Extracted, ExtractedModel, ExtractedSprite};
 
@@ -54,6 +57,9 @@ fn compose_character<'a>(
     let base_plugin = &composed.base.plugin;
     let base = source(base_plugin).ok_or_else(|| missing(base_plugin))?;
     let name = &composed.id;
+    if let Some(slot) = composed.parts.keys().find(|s| part_kind(s).is_none()) {
+        return Err(format!("\"{name}\": a character has no part \"{slot}\""));
+    }
 
     // The base character's own moves and items, imported from its plugin like learned ones.
     let (mut moves, idle) = if let Some(s) = base.sprite(&composed.base.output) {
@@ -115,6 +121,13 @@ fn compose_character<'a>(
             .expect("checked above")
             .with_moves(moves);
         character.movement.speed *= tuning.speed;
+        use_parts(
+            composed,
+            &mut character.stats,
+            &mut character.camera,
+            &mut character.inventory,
+            &mut character.kit,
+        );
         out.sprites.push(ExtractedSprite {
             id: name.clone(),
             sprite: s.sprite.clone(),
@@ -137,6 +150,13 @@ fn compose_character<'a>(
         if composed.hand.is_some() {
             character.hand = composed.hand.clone();
         }
+        use_parts(
+            composed,
+            &mut character.stats,
+            &mut character.camera,
+            &mut character.inventory,
+            &mut character.kit,
+        );
         out.models.push(ExtractedModel {
             id: name.clone(),
             model: m.model.clone(),
@@ -146,6 +166,30 @@ fn compose_character<'a>(
         });
     }
     Ok(())
+}
+
+/// Puts the assets a composed character names for its parts in place of its base character's.
+/// They are names, found when the character plays, like those its plugin writes.
+fn use_parts<C>(
+    composed: &ComposedCharacter,
+    stats: &mut Option<Slot<Stats>>,
+    camera: &mut Option<Slot<C>>,
+    inventory: &mut Option<OutputRef>,
+    kit: &mut Kit,
+) {
+    for (slot, at) in &composed.parts {
+        let at = at.clone();
+        match slot.as_str() {
+            "stats" => *stats = Some(Slot::Ref(at)),
+            "camera" => *camera = Some(Slot::Ref(at)),
+            "inventory" => *inventory = Some(at),
+            "hud" => kit.hud = Some(Slot::Ref(at)),
+            "ui" => kit.ui = Some(Slot::Ref(at)),
+            "input" => kit.input = Some(Slot::Ref(at)),
+            "sounds" => kit.sounds = Some(Slot::Ref(at)),
+            _ => {}
+        }
+    }
 }
 
 impl Extracted {
@@ -358,6 +402,13 @@ mod tests {
                     jump: 1.0,
                 },
                 hand: None,
+                parts: BTreeMap::from([(
+                    "stats".to_string(),
+                    OutputRef {
+                        plugin: "rpg".into(),
+                        output: "tough".into(),
+                    },
+                )]),
             }],
         };
         let source = |p: &str| match p {
@@ -383,6 +434,20 @@ mod tests {
             })
         );
         assert_eq!(dependencies(&composition), vec!["hero", "other"]);
+        // A part it names is used in place of the base character's.
+        assert_eq!(
+            character.stats.as_ref().and_then(Slot::target),
+            Some(&OutputRef {
+                plugin: "rpg".into(),
+                output: "tough".into(),
+            })
+        );
+        let mut wrong = composition.clone();
+        let parts = &mut wrong.characters[0].parts;
+        let tough = parts.remove("stats").unwrap();
+        parts.insert("hat".into(), tough);
+        let err = compose(&wrong, &source).unwrap_err();
+        assert!(err.contains("no part \"hat\""), "{err}");
     }
 
     #[test]
@@ -397,6 +462,7 @@ mod tests {
                 abilities: vec![],
                 tuning: Tuning::default(),
                 hand: None,
+                parts: BTreeMap::new(),
             }],
         };
         let err = compose(&composition, &|_| None).unwrap_err();

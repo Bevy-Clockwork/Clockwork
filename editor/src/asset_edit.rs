@@ -54,7 +54,7 @@ pub struct AssetEditor {
 }
 
 /// The `outputs` item of kind `kind` with id `id` in a recipe's text.
-fn find_output<'a>(doc: &'a Doc, kind: &str, id: &str) -> Option<&'a Node> {
+pub(crate) fn find_output<'a>(doc: &'a Doc, kind: &str, id: &str) -> Option<&'a Node> {
     doc.root.field("outputs")?.items().iter().find(|item| {
         item.name() == Some(kind)
             && item
@@ -80,7 +80,7 @@ fn dedent(text: &str, indent: &str) -> String {
         .join("\n")
 }
 
-fn recipe_path(state: &EditorState, plugin: &str) -> Option<PathBuf> {
+pub(crate) fn recipe_path(state: &EditorState, plugin: &str) -> Option<PathBuf> {
     let index = state.workshop.plugin_index(plugin)?;
     Some(state.workshop.plugins[index].dir.join("recipe.ron"))
 }

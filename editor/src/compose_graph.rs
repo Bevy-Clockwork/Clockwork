@@ -1,6 +1,7 @@
-//! A composition plugin drawn as a node graph: characters and abilities of other plugins on the
-//! left, wired through Learn nodes (what plays for each of an ability's roles) into the composed
-//! characters of this plugin on the right.
+//! A composition plugin drawn as a node graph: characters, abilities and other assets of other
+//! plugins on the left, wired through Learn nodes (what plays for each of an ability's roles) or
+//! straight into a part (stats, camera, HUD, …) of the composed characters of this plugin on the
+//! right.
 //!
 //! The graph is a view: `compose.ron` stays the plugin's content, and only where the nodes sit
 //! (plus characters and abilities not wired yet, which `compose.ron` has no place for) is kept in
@@ -15,7 +16,7 @@ use std::{
 use bevy_egui::egui::{self, Color32, Pos2, Rect, RichText, Stroke, Ui, Vec2, pos2, vec2};
 use clockwork_core::{
     ability::RoleBinding,
-    compose::{AbilityUse, ComposedCharacter, Composition, OutputRef, Tuning},
+    compose::{AbilityUse, ComposedCharacter, Composition, OutputRef, PART_SLOTS, Tuning},
 };
 use egui_snarl::{
     InPin, InPinId, NodeId, OutPin, OutPinId, Snarl,
@@ -29,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     graph_view::{MAX_SCALE, MIN_SCALE, Navigator},
     kit,
-    plugin_editor::{AbilityChoice, CharacterChoice, binding_label, valid_name},
+    plugin_editor::{AbilityChoice, AssetChoice, CharacterChoice, binding_label, valid_name},
     theme,
 };
 
@@ -42,12 +43,19 @@ const ROW: f32 = 150.0;
 /// Space between arranged nodes.
 const GAP: f32 = 40.0;
 
+/// A composed character's inputs: its base, then one per part (see [`PART_SLOTS`]), then the
+/// abilities it learns.
+const FIRST_PART: usize = 1;
+const FIRST_ABILITY: usize = FIRST_PART + PART_SLOTS.len();
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum GraphNode {
     /// A playable character of another plugin.
     Character(OutputRef),
     /// An ability of another plugin.
     Ability(OutputRef),
+    /// Another asset of another plugin (stats, a camera, a HUD, …), of a kind a part takes.
+    Asset { at: OutputRef, kind: String },
     /// An ability learned by the character it is wired into, and what plays for each role.
     Learn {
         roles: BTreeMap<String, RoleBinding>,
@@ -56,7 +64,8 @@ pub enum GraphNode {
         /// until it is set by hand.
         auto_defaults: bool,
     },
-    /// A character of this plugin: its base on input 0, learned abilities on the inputs after.
+    /// A character of this plugin: its base on input 0, its parts on the inputs after (from
+    /// [`FIRST_PART`]), then learned abilities (from [`FIRST_ABILITY`]).
     Composed {
         /// Keeps the characters' order in `compose.ron`.
         serial: u64,
@@ -76,6 +85,8 @@ enum Kind {
     Character,
     Ability,
     Learned,
+    /// An asset of this kind (an output's name), for a part.
+    Asset(&'static str),
 }
 
 impl Kind {
@@ -84,24 +95,41 @@ impl Kind {
             Kind::Character => theme::BRASS_BRIGHT,
             Kind::Ability => Color32::from_rgb(0x6F, 0xB3, 0xA2),
             Kind::Learned => Color32::from_rgb(0xD0, 0x84, 0x5A),
+            Kind::Asset(_) => Color32::from_rgb(0x9A, 0x8F, 0xD0),
         }
     }
+}
+
+/// The kind of asset (as [`PART_SLOTS`] names it) a part takes, if a part takes it.
+fn asset_kind(kind: &str) -> Option<&'static str> {
+    PART_SLOTS.iter().find(|(_, k)| *k == kind).map(|(_, k)| *k)
 }
 
 fn output_kind(node: &GraphNode) -> Option<Kind> {
     match node {
         GraphNode::Character(_) => Some(Kind::Character),
         GraphNode::Ability(_) => Some(Kind::Ability),
+        GraphNode::Asset { kind, .. } => asset_kind(kind).map(Kind::Asset),
         GraphNode::Learn { .. } => Some(Kind::Learned),
         GraphNode::Composed { .. } => None,
     }
+}
+
+/// The part slot a composed character's input is for.
+fn part_of(input: usize) -> Option<(&'static str, &'static str)> {
+    PART_SLOTS.get(input.checked_sub(FIRST_PART)?).copied()
 }
 
 fn input_kind(node: &GraphNode, input: usize) -> Option<Kind> {
     match node {
         GraphNode::Learn { .. } if input == 0 => Some(Kind::Ability),
         GraphNode::Composed { .. } if input == 0 => Some(Kind::Character),
-        GraphNode::Composed { abilities, .. } if input <= abilities + 1 => Some(Kind::Learned),
+        GraphNode::Composed { .. } if input < FIRST_ABILITY => {
+            part_of(input).map(|(_, kind)| Kind::Asset(kind))
+        }
+        GraphNode::Composed { abilities, .. } if input <= abilities + FIRST_ABILITY => {
+            Some(Kind::Learned)
+        }
         _ => None,
     }
 }
@@ -122,6 +150,8 @@ pub struct Layout {
 pub enum Loose {
     Character(OutputRef, (f32, f32)),
     Ability(OutputRef, (f32, f32)),
+    /// An asset, and its kind.
+    Asset(OutputRef, String, (f32, f32)),
 }
 
 /// Reads a plugin folder's layout; a missing or unreadable one just means nodes get placed anew.
@@ -224,6 +254,13 @@ fn character_of(snarl: &Snarl<GraphNode>, node: Option<NodeId>) -> Option<&Outpu
     }
 }
 
+fn asset_of(snarl: &Snarl<GraphNode>, node: Option<NodeId>) -> Option<&OutputRef> {
+    match node.map(|n| &snarl[n]) {
+        Some(GraphNode::Asset { at, .. }) => Some(at),
+        _ => None,
+    }
+}
+
 fn ability_of(snarl: &Snarl<GraphNode>, node: Option<NodeId>) -> Option<&OutputRef> {
     match node.map(|n| &snarl[n]) {
         Some(GraphNode::Ability(r)) => Some(r),
@@ -312,6 +349,7 @@ impl CompositionGraph {
         };
         let mut characters: HashMap<OutputRef, NodeId> = HashMap::new();
         let mut abilities: HashMap<OutputRef, NodeId> = HashMap::new();
+        let mut assets: HashMap<(OutputRef, &str), NodeId> = HashMap::new();
         let mut y = 0.0;
         for (serial, c) in composition.characters.iter().enumerate() {
             let composed = snarl.insert_node(
@@ -341,8 +379,35 @@ impl CompositionGraph {
                     input: 0,
                 },
             );
+            let mut row = y;
+            for (input, (slot, kind)) in PART_SLOTS.iter().enumerate() {
+                let Some(at) = c.parts.get(*slot) else {
+                    continue;
+                };
+                row += ROW;
+                let asset = *assets.entry((at.clone(), kind)).or_insert_with(|| {
+                    snarl.insert_node(
+                        place(format!("asset/{kind}/{}", ref_key(at)), 0.0, row),
+                        GraphNode::Asset {
+                            at: at.clone(),
+                            kind: kind.to_string(),
+                        },
+                    )
+                });
+                snarl.connect(
+                    OutPinId {
+                        node: asset,
+                        output: 0,
+                    },
+                    InPinId {
+                        node: composed,
+                        input: FIRST_PART + input,
+                    },
+                );
+            }
+            let y_parts = row - y;
             for (i, learned) in c.abilities.iter().enumerate() {
-                let row = y + (i + 1) as f32 * ROW;
+                let row = y + y_parts + (i + 1) as f32 * ROW;
                 let ability = *abilities.entry(learned.ability.clone()).or_insert_with(|| {
                     snarl.insert_node(
                         place(format!("ability/{}", ref_key(&learned.ability)), 0.0, row),
@@ -378,11 +443,11 @@ impl CompositionGraph {
                     },
                     InPinId {
                         node: composed,
-                        input: i + 1,
+                        input: FIRST_ABILITY + i,
                     },
                 );
             }
-            y += (c.abilities.len() + 2) as f32 * ROW;
+            y += y_parts + (c.abilities.len() + 2) as f32 * ROW;
         }
         for loose in &layout.loose {
             match loose {
@@ -390,6 +455,13 @@ impl CompositionGraph {
                     snarl.insert_node(at(*p), GraphNode::Character(r.clone()))
                 }
                 Loose::Ability(r, p) => snarl.insert_node(at(*p), GraphNode::Ability(r.clone())),
+                Loose::Asset(r, kind, p) => snarl.insert_node(
+                    at(*p),
+                    GraphNode::Asset {
+                        at: r.clone(),
+                        kind: kind.clone(),
+                    },
+                ),
             };
         }
         let mut nav = Navigator::default();
@@ -419,6 +491,7 @@ impl CompositionGraph {
         id_salt: &str,
         characters: &[CharacterChoice],
         abilities: &[AbilityChoice],
+        assets: &[AssetChoice],
         can_place: bool,
     ) -> Shown {
         self.nav.update(
@@ -429,6 +502,7 @@ impl CompositionGraph {
                 GraphNode::Character(r) | GraphNode::Ability(r) => {
                     format!("{} {}", r.output, r.plugin)
                 }
+                GraphNode::Asset { at, kind } => format!("{} {} {kind}", at.output, at.plugin),
                 GraphNode::Learn { roles, .. } => {
                     let roles: Vec<&str> = roles.keys().map(String::as_str).collect();
                     format!("learn {}", roles.join(" "))
@@ -440,6 +514,7 @@ impl CompositionGraph {
             nav: &mut self.nav,
             characters,
             abilities,
+            assets,
             next_serial: &mut self.next_serial,
             can_place,
             place: None,
@@ -469,6 +544,7 @@ impl CompositionGraph {
             .minimap(ui, id_salt, &self.snarl, &self.sizes, |node| match node {
                 GraphNode::Character(_) => theme::BRASS,
                 GraphNode::Ability(_) | GraphNode::Learn { .. } => theme::PARCHMENT_DIM,
+                GraphNode::Asset { .. } => Kind::Asset("").color(),
                 GraphNode::Composed { .. } => theme::SUCCESS,
             });
         self.normalize();
@@ -530,7 +606,7 @@ impl CompositionGraph {
         let snarl = &self.snarl;
         let size = |node: NodeId| self.sizes.get(&node).copied().unwrap_or(vec2(240.0, 120.0));
         let column = |n: &GraphNode| match n {
-            GraphNode::Character(_) | GraphNode::Ability(_) => 0,
+            GraphNode::Character(_) | GraphNode::Ability(_) | GraphNode::Asset { .. } => 0,
             GraphNode::Learn { .. } => 1,
             GraphNode::Composed { .. } => 2,
         };
@@ -569,10 +645,15 @@ impl CompositionGraph {
             if let Some(base) = source(snarl, node, 0) {
                 put(base, 0, top, &mut placed, &mut bottom);
             }
+            for input in FIRST_PART..FIRST_ABILITY {
+                if let Some(asset) = source(snarl, node, input) {
+                    put(asset, 0, top, &mut placed, &mut bottom);
+                }
+            }
             let GraphNode::Composed { abilities, .. } = &snarl[node] else {
                 continue;
             };
-            for input in 1..=*abilities {
+            for input in FIRST_ABILITY..FIRST_ABILITY + *abilities {
                 let Some(learn) = source(snarl, node, input) else {
                     continue;
                 };
@@ -628,8 +709,15 @@ impl CompositionGraph {
                     .push(format!("{id} needs a base character: wire one into it"));
                 continue;
             };
+            let parts = (FIRST_PART..FIRST_ABILITY)
+                .filter_map(|input| {
+                    let (slot, _) = part_of(input)?;
+                    let at = asset_of(snarl, source(snarl, node, input))?;
+                    Some((slot.to_string(), at.clone()))
+                })
+                .collect();
             let mut learned: Vec<AbilityUse> = Vec::new();
-            for input in 1..=*abilities {
+            for input in FIRST_ABILITY..FIRST_ABILITY + *abilities {
                 let Some(learn) = source(snarl, node, input) else {
                     continue;
                 };
@@ -666,6 +754,7 @@ impl CompositionGraph {
                 abilities: learned,
                 tuning: *tuning,
                 hand: hand.clone(),
+                parts,
             });
         }
         let stray = snarl
@@ -694,6 +783,9 @@ impl CompositionGraph {
                     layout.loose.push(Loose::Character(r.clone(), p))
                 }
                 (GraphNode::Ability(r), false) => layout.loose.push(Loose::Ability(r.clone(), p)),
+                (GraphNode::Asset { at, kind }, false) => {
+                    layout.loose.push(Loose::Asset(at.clone(), kind.clone(), p))
+                }
                 _ => {
                     if let Some(key) = node_key(snarl, node) {
                         layout.positions.insert(key, p);
@@ -716,7 +808,7 @@ impl CompositionGraph {
             })
             .collect();
         for (node, count) in composed {
-            let wired: Vec<(usize, OutPinId)> = (1..=count + 1)
+            let wired: Vec<(usize, OutPinId)> = (FIRST_ABILITY..=FIRST_ABILITY + count)
                 .filter_map(|input| {
                     snarl
                         .in_pin(InPinId { node, input })
@@ -729,15 +821,21 @@ impl CompositionGraph {
                 && wired
                     .iter()
                     .enumerate()
-                    .all(|(i, (input, _))| *input == i + 1);
+                    .all(|(i, (input, _))| *input == FIRST_ABILITY + i);
             if tidy {
                 continue;
             }
-            for input in 1..=count + 1 {
+            for input in FIRST_ABILITY..=FIRST_ABILITY + count {
                 snarl.drop_inputs(InPinId { node, input });
             }
             for (i, (_, from)) in wired.iter().enumerate() {
-                snarl.connect(*from, InPinId { node, input: i + 1 });
+                snarl.connect(
+                    *from,
+                    InPinId {
+                        node,
+                        input: FIRST_ABILITY + i,
+                    },
+                );
             }
             if let GraphNode::Composed { abilities, .. } = &mut snarl[node] {
                 *abilities = wired.len();
@@ -796,6 +894,7 @@ fn node_key(snarl: &Snarl<GraphNode>, node: NodeId) -> Option<String> {
         GraphNode::Composed { id, .. } => Some(format!("character/{id}")),
         GraphNode::Character(r) => Some(format!("base/{}", ref_key(r))),
         GraphNode::Ability(r) => Some(format!("ability/{}", ref_key(r))),
+        GraphNode::Asset { at, kind } => Some(format!("asset/{kind}/{}", ref_key(at))),
         GraphNode::Learn { .. } => {
             let ability = ability_of(snarl, source(snarl, node, 0))?;
             let GraphNode::Composed { id, .. } = &snarl[learner_of(snarl, node)?] else {
@@ -836,6 +935,8 @@ pub struct Viewer<'a> {
     pub nav: &'a mut Navigator,
     pub characters: &'a [CharacterChoice],
     pub abilities: &'a [AbilityChoice],
+    /// Assets parts can use, of every kind a part takes.
+    pub assets: &'a [AssetChoice],
     pub next_serial: &'a mut u64,
     /// Whether characters can be placed in the scene (only once saved).
     pub can_place: bool,
@@ -887,6 +988,32 @@ impl Viewer<'_> {
             }
         }
         picked
+    }
+
+    /// The assets of `kind`, to pick one; `None` until one is picked.
+    fn asset_menu(&self, ui: &mut Ui, kind: &str) -> Option<OutputRef> {
+        let mut picked = None;
+        let of_kind: Vec<&AssetChoice> = self.assets.iter().filter(|a| a.kind == kind).collect();
+        if of_kind.is_empty() {
+            ui.label(RichText::new(format!("No {kind} assets yet")).color(theme::PARCHMENT_DIM));
+        }
+        for a in of_kind {
+            if ui
+                .button(format!("{} · {}", a.at.output, a.at.plugin))
+                .clicked()
+            {
+                picked = Some(a.at.clone());
+                ui.close();
+            }
+        }
+        picked
+    }
+
+    fn asset_body(&self, ui: &mut Ui, at: &OutputRef, kind: &str) {
+        ui.label(RichText::new(format!("{kind} from {}", at.plugin)).color(theme::PARCHMENT_DIM));
+        if !self.assets.iter().any(|a| a.at == *at && a.kind == kind) {
+            ui.small(RichText::new("Not found").color(theme::ERROR));
+        }
     }
 
     fn character_body(&self, ui: &mut Ui, r: &OutputRef) {
@@ -1096,6 +1223,7 @@ impl SnarlViewer<GraphNode> for Viewer<'_> {
             GraphNode::Ability(r) => self
                 .ability(r)
                 .map_or_else(|| r.output.clone(), |a| a.name.clone()),
+            GraphNode::Asset { at, .. } => at.output.clone(),
             GraphNode::Learn { .. } => "Learn".into(),
             GraphNode::Composed { id, .. } => id.clone(),
         }
@@ -1103,9 +1231,9 @@ impl SnarlViewer<GraphNode> for Viewer<'_> {
 
     fn inputs(&mut self, node: &GraphNode) -> usize {
         match node {
-            GraphNode::Character(_) | GraphNode::Ability(_) => 0,
+            GraphNode::Character(_) | GraphNode::Ability(_) | GraphNode::Asset { .. } => 0,
             GraphNode::Learn { .. } => 1,
-            GraphNode::Composed { abilities, .. } => abilities + 2,
+            GraphNode::Composed { abilities, .. } => FIRST_ABILITY + abilities + 1,
         }
     }
 
@@ -1124,10 +1252,18 @@ impl SnarlViewer<GraphNode> for Viewer<'_> {
     ) -> impl SnarlPin + 'static {
         let kind = input_kind(&snarl[pin.id.node], pin.id.input).unwrap_or(Kind::Learned);
         let label = match kind {
-            Kind::Character => "based on",
-            Kind::Ability => "ability",
-            Kind::Learned if pin.remotes.is_empty() => "learns…",
-            Kind::Learned => "learns",
+            Kind::Character => "based on".to_string(),
+            Kind::Ability => "ability".to_string(),
+            Kind::Learned if pin.remotes.is_empty() => "learns…".to_string(),
+            Kind::Learned => "learns".to_string(),
+            Kind::Asset(_) => {
+                let (slot, _) = part_of(pin.id.input).unwrap_or_default();
+                if pin.remotes.is_empty() {
+                    format!("{slot}: its own")
+                } else {
+                    slot.to_string()
+                }
+            }
         };
         ui.label(RichText::new(label).color(theme::PARCHMENT_DIM));
         PinInfo::circle().with_fill(kind.color())
@@ -1144,6 +1280,7 @@ impl SnarlViewer<GraphNode> for Viewer<'_> {
             Kind::Character => "character",
             Kind::Ability => "ability",
             Kind::Learned => "learned",
+            Kind::Asset(kind) => kind,
         };
         ui.label(RichText::new(label).color(theme::PARCHMENT_DIM));
         PinInfo::circle().with_fill(kind.color())
@@ -1167,6 +1304,7 @@ impl SnarlViewer<GraphNode> for Viewer<'_> {
             match snarl[node].clone() {
                 GraphNode::Character(r) => self.character_body(ui, &r),
                 GraphNode::Ability(r) => self.ability_body(ui, &r),
+                GraphNode::Asset { at, kind } => self.asset_body(ui, &at, &kind),
                 GraphNode::Learn { .. } => self.learn_body(node, ui, snarl),
                 GraphNode::Composed { .. } => self.composed_body(node, ui, snarl),
             }
@@ -1238,6 +1376,16 @@ impl SnarlViewer<GraphNode> for Viewer<'_> {
                 snarl.insert_node(pos, GraphNode::Ability(r));
             }
         });
+        ui.menu_button("Part from…", |ui| {
+            for (slot, kind) in PART_SLOTS {
+                ui.menu_button(format!("{kind}  ({slot})"), |ui| {
+                    if let Some(at) = self.asset_menu(ui, kind) {
+                        let kind = kind.to_string();
+                        snarl.insert_node(pos, GraphNode::Asset { at, kind });
+                    }
+                });
+            }
+        });
     }
 
     fn has_dropped_wire_menu(&mut self, src_pins: AnyPins, _snarl: &mut Snarl<GraphNode>) -> bool {
@@ -1271,7 +1419,12 @@ impl SnarlViewer<GraphNode> for Viewer<'_> {
                         },
                         Kind::Learned => InPinId {
                             node: add_composed(snarl, self.next_serial, pos),
-                            input: 1,
+                            input: FIRST_ABILITY,
+                        },
+                        Kind::Asset(kind) => InPinId {
+                            node: add_composed(snarl, self.next_serial, pos),
+                            input: FIRST_PART
+                                + PART_SLOTS.iter().position(|(_, k)| *k == kind).unwrap_or(0),
                         },
                     };
                     wire(snarl, *from, to);
@@ -1320,6 +1473,14 @@ impl SnarlViewer<GraphNode> for Viewer<'_> {
                         );
                     }
                 }
+                Some(Kind::Asset(kind)) => {
+                    ui.label(RichText::new(kind).color(theme::PARCHMENT_DIM));
+                    if let Some(at) = self.asset_menu(ui, kind) {
+                        let kind = kind.to_string();
+                        let node = snarl.insert_node(pos, GraphNode::Asset { at, kind });
+                        wire(snarl, OutPinId { node, output: 0 }, *to);
+                    }
+                }
                 None => {}
             },
             _ => {}
@@ -1362,6 +1523,7 @@ mod tests {
                         jump: 1.0,
                     },
                     hand: Some("right_hand".into()),
+                    parts: [("stats".to_string(), r("game-c-rpg", "tough"))].into(),
                 },
                 ComposedCharacter {
                     id: "fast_runner".into(),
@@ -1373,6 +1535,7 @@ mod tests {
                     }],
                     tuning: Tuning::default(),
                     hand: None,
+                    parts: BTreeMap::new(),
                 },
             ],
         }
@@ -1393,6 +1556,7 @@ mod tests {
         assert_eq!(count(|n| matches!(n, GraphNode::Character(_))), 1);
         assert_eq!(count(|n| matches!(n, GraphNode::Ability(_))), 2);
         assert_eq!(count(|n| matches!(n, GraphNode::Learn { .. })), 3);
+        assert_eq!(count(|n| matches!(n, GraphNode::Asset { .. })), 1);
     }
 
     #[test]
@@ -1431,13 +1595,44 @@ mod tests {
         let inp = |node, input| InPinId { node, input };
         // An ability can't be a base, and a character can't be learned.
         assert!(!wire(&mut graph.snarl, out(bow), inp(composed, 0)));
-        assert!(!wire(&mut graph.snarl, out(hero), inp(composed, 1)));
+        assert!(!wire(
+            &mut graph.snarl,
+            out(hero),
+            inp(composed, FIRST_ABILITY)
+        ));
+        assert!(!wire(
+            &mut graph.snarl,
+            out(hero),
+            inp(composed, FIRST_PART)
+        ));
         assert_eq!(graph.build().errors.len(), 1);
 
         assert!(wire(&mut graph.snarl, out(hero), inp(composed, 0)));
         let learn = graph.snarl.insert_node(Pos2::ZERO, new_learn());
         assert!(wire(&mut graph.snarl, out(bow), inp(learn, 0)));
-        assert!(wire(&mut graph.snarl, out(learn), inp(composed, 1)));
+        assert!(wire(
+            &mut graph.snarl,
+            out(learn),
+            inp(composed, FIRST_ABILITY)
+        ));
+        // Stats go into the stats part, and nothing else does.
+        let stats = graph.snarl.insert_node(
+            Pos2::ZERO,
+            GraphNode::Asset {
+                at: r("builtin", "stats"),
+                kind: "Stats".into(),
+            },
+        );
+        assert!(!wire(
+            &mut graph.snarl,
+            out(stats),
+            inp(composed, FIRST_PART + 1)
+        ));
+        assert!(wire(
+            &mut graph.snarl,
+            out(stats),
+            inp(composed, FIRST_PART)
+        ));
         graph.normalize();
 
         let built = graph.build();
@@ -1445,6 +1640,7 @@ mod tests {
         let c = &built.composition.characters[0];
         assert_eq!(c.id, "hero_plus");
         assert_eq!(c.abilities[0].ability, r("game-a-hero", "bow"));
+        assert_eq!(c.parts["stats"], r("builtin", "stats"));
         // The same plugin's ability uses its own poses unless set otherwise.
         assert!(c.abilities[0].use_defaults);
         assert!(matches!(
@@ -1462,7 +1658,7 @@ mod tests {
         );
         graph.snarl.drop_inputs(InPinId {
             node: composed,
-            input: 1,
+            input: FIRST_ABILITY,
         });
         graph.normalize();
         assert!(matches!(

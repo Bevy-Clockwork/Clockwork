@@ -160,6 +160,8 @@ pub struct Workshop {
     pub presses: Vec<String>,
     /// The asset whose fields the Inspector edits.
     pub asset_editor: crate::asset_edit::AssetEditor,
+    /// The timeline of the selected character's action.
+    pub timeline: crate::timeline::Timeline,
 }
 
 /// The sounds of the played character's kit, by what makes them.
@@ -268,6 +270,7 @@ impl Default for Workshop {
             menu_toggle: None,
             presses: Vec::new(),
             asset_editor: Default::default(),
+            timeline: Default::default(),
         }
     }
 }
