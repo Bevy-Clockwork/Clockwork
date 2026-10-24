@@ -83,6 +83,18 @@ pub fn search(rom: &[u8], needle: &[u8], align: usize, max: usize) -> Vec<usize>
 }
 
 /// Decompresses at `offset` and describes the result.
+/// The m4a song table and its songs, one a line: number, header offset, tracks.
+pub fn songs(rom: &[u8]) -> Result<String, String> {
+    let (table, songs) = clockwork_gba::m4a::find_song_table(rom)
+        .ok_or("No m4a song table found: the game may use another music engine.")?;
+    let mut text = format!("Song table at {table:#08X}, {} songs:\n", songs.len());
+    for (i, at) in songs.iter().enumerate() {
+        let tracks = rom.get(*at).copied().unwrap_or(0);
+        text.push_str(&format!("{i:4}  song: {at:#08X}  tracks: {tracks}\n"));
+    }
+    Ok(text)
+}
+
 pub fn decompress(rom: &[u8], offset: usize, codec: Codec) -> Result<String, String> {
     let data = rom
         .get(offset..)

@@ -1,9 +1,10 @@
 //! Game Boy Advance platform module.
 //!
-//! LZ77 decompression, palettes, 4bpp tiles, metatiles and OAM objects. Later: m4a audio.
+//! LZ77 decompression, palettes, 4bpp tiles, metatiles, OAM objects and m4a music.
 
 pub mod gfx;
 pub mod lz77;
+pub mod m4a;
 pub mod obj;
 pub mod popuri;
 

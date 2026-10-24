@@ -68,6 +68,8 @@ pub enum Effect {
     Say(Slot<crate::ui::Dialog>),
     /// Plays a sound asset, `"plugin/output"`.
     Sound(String),
+    /// Plays a music asset, `"plugin/output"`, in place of the music playing; `""` stops it.
+    Music(String),
     /// Raises a flag (see [`Condition::Flag`]); it stays up until play stops or it's cleared.
     Set(String),
     /// Lowers a flag.

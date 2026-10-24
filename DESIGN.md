@@ -699,6 +699,27 @@ functions, timers, distance checks) into states and numbers rather than code.
 Not yet: actors that throw projectiles or use actions, actors blocking each other, flying and
 jumping motions, and paths around walls (they walk straight and slide).
 
+### 7.10.2 Music (implemented)
+
+Most GBA games play their music with the **m4a** engine (MusicPlayer2000, "Sappy"), so it is
+read as a platform format (`clockwork_gba::m4a`), not per game.
+
+- **A song** is a header (its voice group and tracks) and tracks of commands: notes and ties,
+  waits, voice, volume, pan, bend, key shift, tempo, patterns, repeats and jumps. Voices play
+  samples (looped or not, fixed or pitched), square, wave and noise channels, and key splits and
+  drum kits that pick another voice by key. Envelopes run at the screen's rate, as the engine's.
+- **Rendering** turns a song into stereo samples and finds its loop: where the first track
+  jumps back to. Play plays the part before it once and then repeats the loop.
+- **Recipes:** `Music(id, song: 0x...)` names a song by its header's offset; the agent's
+  `find_songs` finds the song table (the longest run of entries pointing to valid songs).
+  Extraction only checks the header; a song is rendered on another thread the first time it
+  plays.
+- **Play:** a game's settings name the music playing from the start, and the effect
+  `Music("plugin/output")` changes it (`""` stops it), from a trigger or an actor's state.
+
+Not yet: modulation (vibrato), reverb, compressed samples, and the engine's exact mixing rate
+and volume curve, so songs sound close to the game but not identical.
+
 ### 7.11 Abilities and composition plugins (implemented)
 
 Moves go from one character to another, across games and between 2D and 3D:
@@ -925,6 +946,7 @@ M1 and M2 need no AI on purpose. They build the foundation the agent stands on.
 | 2026-10-21 | Library games can be linked to a decompilation repository; known decomps are suggested by ROM hash from `knowledge/decomps.ron`. The agent (M3) uses the linked decomp as its main source | §6 |
 | 2026-10-21 | Game-specific knowledge lives in plugin data, never in Clockwork code: recipes use generic steps (`Lookup`), and what a game's codes mean is a code → property table in the plugin (`Surfaces` output) | §4.4, §5.1 |
 | 2026-10-23 | Nothing names a game: collision is read by a data-described `CollisionTriangles` step (replacing SM64-only `N64Collision`), known decomps come from content folders, the roll slot is the `dodge` and the boomerang motion `Return` (old names still load) | §4, §5 |
+| 2026-10-24 | Music is the m4a engine's songs rendered by Clockwork, looped where they loop; extraction checks, playing renders | §7.10.2 |
 | 2026-10-24 | Enemies and NPCs are `Actor` behaviors: state machines of data (motions, cues, effects), never per-game code; Play's simulation lives in `clockwork_runtime::play` | §7.6, §7.10.1 |
 | 2026-10-24 | Where a game places things is read from its record tables by a generic `Places` step, never written into a recipe; `MarkPlaces` turns placements into surface cells and a `Scene` output into Workshop nodes. GBA background steps take `depth: Bpp8` for 256-color modes. A `Surfaces` output names the image it covers (`image`), so maps of equal size don't get each other's collision | §5.1, §7.2 |
 

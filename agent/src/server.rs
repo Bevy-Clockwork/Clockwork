@@ -102,6 +102,11 @@ pub struct SearchRomArgs {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct FindSongsArgs {
+    pub game: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct DecompressArgs {
     pub game: String,
     /// Offset of the compressed data, e.g. "0x324EB4".
@@ -445,6 +450,20 @@ impl Clockwork {
                 }
             };
             rom::decompress(&rom, a.offset.value()?, codec)
+        })())
+    }
+
+    #[tool(
+        description = "Find the m4a song table in a GBA ROM (the music engine most GBA games \
+                          use) and list its songs: each one's header offset, for a Music output, \
+                          and its track count."
+    )]
+    async fn find_songs(&self, args: Parameters<FindSongsArgs>) -> ToolResult {
+        self.track("find_songs");
+        let a = args.0;
+        reply((|| {
+            let rom = self.rom_of(&a.game)?;
+            rom::songs(&rom)
         })())
     }
 

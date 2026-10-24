@@ -73,6 +73,9 @@ pub struct GameSettings {
     pub stats: Option<String>,
     #[serde(default)]
     pub inventory: Option<String>,
+    /// What plays from the start, until an effect plays other music.
+    #[serde(default)]
+    pub music: Option<String>,
 }
 
 pub const RULES: &str = "rules";

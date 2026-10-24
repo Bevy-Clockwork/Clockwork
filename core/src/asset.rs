@@ -513,6 +513,13 @@ pub static KINDS: &[AssetKind] = &[
         builtins: no_builtins,
     },
     AssetKind {
+        name: "Music",
+        category: Some(Kind::Audio),
+        placeable: false,
+        uses: no_uses,
+        builtins: no_builtins,
+    },
+    AssetKind {
         name: "Dialog",
         category: Some(Kind::Dialog),
         placeable: false,

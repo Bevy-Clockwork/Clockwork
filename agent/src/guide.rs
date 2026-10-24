@@ -501,7 +501,12 @@ panels with an `Image` (`frame: Some((image: "plugin/image", border: 3))`, nine-
 `Sound(id, from: "buffer", rate: 13379, format: S8 | U8 | S16)` reads samples (GBA games often
 keep plain signed 8-bit PCM); triggers play them with the effect `Sound("plugin/sound")`, and a
 character's kit can name `sounds: Some("plugin/sounds")`, a `Sounds(id, sounds: (hurt, pickup,
-door, menu))` output. `Dialog(id, dialog: (speaker: Some("Sign"), pages: ["...", "..."]))` is
+door, menu))` output. Music: most GBA games play theirs with the m4a engine ("Sappy");
+`find_songs` lists a ROM's song table, and `Music(id, song: 0x...)` names a song by its
+header's offset (rendered with its instruments and looped where the song loops; `seconds:
+Some(90.0)` cuts a song that never ends). A game's settings play one from the start (`music:
+Some("plugin/music")`), and the effect `Music("plugin/music")` changes it (`Music("")` stops
+it): put it in a trigger at an area's door, or a boss actor's state. `Dialog(id, dialog: (speaker: Some("Sign"), pages: ["...", "..."]))` is
 shown by the trigger effect `Say("plugin/dialog")` (or `Say((speaker, pages))` in place).
 A game's own text never goes in a recipe: decode it with a `Text` step and give the dialog
 `from: Some("text"), lines_per_page: Some(4)` instead of pages.

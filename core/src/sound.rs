@@ -61,6 +61,54 @@ impl Pcm {
     }
 }
 
+/// A piece of music ready to play: interleaved stereo samples (left, right) at a rate, played
+/// once from the start and then from `loop_start` (a frame: one left and right pair) forever.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Music {
+    pub rate: u32,
+    pub samples: Vec<i16>,
+    /// Where it repeats from when it reaches its end; it ends without.
+    pub loop_start: Option<usize>,
+}
+
+impl Music {
+    /// How many frames (left and right pairs) it has.
+    pub fn frames(&self) -> usize {
+        self.samples.len() / 2
+    }
+
+    /// Frames `range` as a stereo WAV file, for players that read files.
+    pub fn wav(&self, range: std::ops::Range<usize>) -> Vec<u8> {
+        let samples = &self.samples[range.start * 2..range.end * 2];
+        let data = samples.len() as u32 * 2;
+        let mut out = Vec::with_capacity(44 + data as usize);
+        out.extend_from_slice(b"RIFF");
+        out.extend_from_slice(&(36 + data).to_le_bytes());
+        out.extend_from_slice(b"WAVEfmt ");
+        out.extend_from_slice(&16u32.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        out.extend_from_slice(&2u16.to_le_bytes()); // stereo
+        out.extend_from_slice(&self.rate.to_le_bytes());
+        out.extend_from_slice(&(self.rate * 4).to_le_bytes());
+        out.extend_from_slice(&4u16.to_le_bytes());
+        out.extend_from_slice(&16u16.to_le_bytes());
+        out.extend_from_slice(b"data");
+        out.extend_from_slice(&data.to_le_bytes());
+        for s in samples {
+            out.extend_from_slice(&s.to_le_bytes());
+        }
+        out
+    }
+
+    /// The part played once (up to the loop, or all of it) and the part repeated after it.
+    pub fn parts(&self) -> (std::ops::Range<usize>, Option<std::ops::Range<usize>>) {
+        match self.loop_start {
+            Some(at) if at < self.frames() => (0..at, Some(at..self.frames())),
+            _ => (0..self.frames(), None),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -74,5 +122,21 @@ mod tests {
         let wav = pcm.to_wav();
         assert_eq!(&wav[0..4], b"RIFF");
         assert_eq!(wav.len(), 44 + 6);
+    }
+
+    #[test]
+    fn music_splits_into_its_intro_and_its_loop() {
+        let music = Music {
+            rate: 8000,
+            samples: vec![0; 20],
+            loop_start: Some(4),
+        };
+        assert_eq!(music.parts(), (0..4, Some(4..10)));
+        assert_eq!(music.wav(4..10).len(), 44 + 6 * 4);
+        let once = Music {
+            loop_start: None,
+            ..music
+        };
+        assert_eq!(once.parts(), (0..10, None));
     }
 }

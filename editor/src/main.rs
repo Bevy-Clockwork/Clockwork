@@ -143,7 +143,7 @@ fn main() {
                     title_logo::title_logo_system,
                 )
                     .chain(),
-                game_sound::sound_system,
+                (game_sound::sound_system, game_sound::music_system),
                 // Pose the bones, then turn billboards to the camera.
                 (models::animate_system, models::face_camera_system).chain(),
                 sprites::billboard_system,

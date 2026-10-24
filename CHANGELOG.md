@@ -4,6 +4,10 @@
 
 ### Added
 
+- `Music` recipe output: an m4a song (the music engine most GBA games use), rendered with its
+  instruments and looped where it loops. Games play music from the start (the `music` game
+  setting) and change it with the `Music` effect. The agent's `find_songs` tool finds a ROM's
+  song table.
 - `Places` recipe step: reads where a game places things (rooms, doors, enemies, objects) from
   its own tables of records, with filters, an end marker, names and groups made from record
   fields, the output each shows, door targets and how far each reaches.

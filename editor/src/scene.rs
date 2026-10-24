@@ -182,6 +182,9 @@ pub struct Game {
     pub stats: Option<OutputRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inventory: Option<OutputRef>,
+    /// What plays from the start, until an effect plays other music.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub music: Option<OutputRef>,
 }
 
 impl Game {

@@ -764,6 +764,16 @@ pub const OUTPUTS: &[VariantInfo] = &[
         ],
     },
     VariantInfo {
+        name: "Music",
+        about: "Music: an m4a song (most GBA games' music engine), rendered and looped where it loops.",
+        fields: &[
+            f("id", Text, "Its id in the plugin"),
+            f("song", Offset, "Where the song's header is in the ROM"),
+            d("rate", Count, "Samples per second (22050)"),
+            d("seconds", Number, "At most this long: Some(90.0)"),
+        ],
+    },
+    VariantInfo {
         name: "Dialog",
         about: "Text shown a page at a time: (speaker: Some(\"Zelda\"), pages: [\"...\"]).",
         fields: &[

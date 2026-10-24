@@ -1923,7 +1923,7 @@ fn effect_editor(
     names: &[String],
 ) {
     use crate::entities::Effect;
-    let choices: [(&str, NewEffect); 11] = [
+    let choices: [(&str, NewEffect); 12] = [
         ("Show a message", |_, _| Effect::Message("Hello!".into())),
         ("Teleport the player", |_, names| {
             Effect::Teleport(names.first().cloned().unwrap_or_default())
@@ -1943,6 +1943,7 @@ fn effect_editor(
             ))
         }),
         ("Play a sound", |_, _| Effect::Sound(String::new())),
+        ("Play music", |_, _| Effect::Music(String::new())),
         ("Raise a flag", |_, _| Effect::Set(String::new())),
         ("Lower a flag", |_, _| Effect::Clear(String::new())),
         ("Do several things", |_, _| Effect::All(Vec::new())),
@@ -1956,6 +1957,7 @@ fn effect_editor(
         Effect::Heal(_) => "Heal the player",
         Effect::Say(_) => "Show a dialog",
         Effect::Sound(_) => "Play a sound",
+        Effect::Music(_) => "Play music",
         Effect::Set(_) => "Raise a flag",
         Effect::Clear(_) => "Lower a flag",
         Effect::All(_) => "Do several things",
@@ -2019,19 +2021,25 @@ fn effect_editor(
         Effect::Say(clockwork_core::asset::Slot::Ref(at)) => {
             ui.label(format!("The dialog {at}"));
         }
-        Effect::Sound(name) => {
+        Effect::Sound(_) | Effect::Music(_) => {
+            let (kind, none) = match effect {
+                Effect::Music(_) => ("Music", "(no music)"),
+                _ => ("Sound", "(choose a sound)"),
+            };
+            let (Effect::Sound(name) | Effect::Music(name)) = effect else {
+                unreachable!()
+            };
             let sounds: Vec<String> =
                 clockwork_recipe::assets::AssetIndex::build(&state.workshop.plugins)
-                    .of_kind("Sound")
+                    .of_kind(kind)
                     .map(|a| a.at.to_string())
                     .collect();
             egui::ComboBox::from_id_salt((salt, "sound"))
-                .selected_text(if name.is_empty() {
-                    "(choose a sound)"
-                } else {
-                    name.as_str()
-                })
+                .selected_text(if name.is_empty() { none } else { name.as_str() })
                 .show_ui(ui, |ui| {
+                    if kind == "Music" && ui.selectable_label(name.is_empty(), none).clicked() {
+                        name.clear();
+                    }
                     for sound in sounds {
                         if ui.selectable_label(*name == sound, &sound).clicked() {
                             *name = sound;

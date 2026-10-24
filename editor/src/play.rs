@@ -185,8 +185,10 @@ pub fn play_system(
             // the whole window.
             flow.begin(&mut state);
             state.workshop.game_view = flow.is_game();
+            state.workshop.music = Some(crate::play_kit::game(&mut state).music);
         }
         Some(false) => {
+            state.workshop.music = Some(None);
             // Actors go back to their own animations, and their nodes to where they stand.
             for mut rig in &mut rigs {
                 if state.workshop.acting.contains(&rig.node) {
@@ -427,6 +429,14 @@ pub fn play_system(
                     session.waiting_dialog = Some(at);
                 }
             }
+            Happened::Music(name) if name.is_empty() => state.workshop.music = Some(None),
+            Happened::Music(name) => match asset::OutputRef::parse(&name) {
+                Some(at) => state.workshop.music = Some(Some(at)),
+                None => state.log(
+                    LogLevel::Warn,
+                    format!("\"{name}\" is not \"plugin/output\""),
+                ),
+            },
             Happened::Sound(name) => match asset::OutputRef::parse(&name) {
                 Some(at) => state.workshop.sounds.push(at),
                 None => state.log(

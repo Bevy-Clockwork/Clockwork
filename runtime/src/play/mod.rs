@@ -309,6 +309,8 @@ pub enum Happened {
     Say(Slot<Dialog>),
     /// A sound asset to play, `"plugin/output"` as written.
     Sound(String),
+    /// The music to play from now on, `"plugin/output"` as written; `""` for none.
+    Music(String),
     /// The player arrived at a node through a door or a teleport, from where it stood.
     Arrived { name: String, from: Vec3 },
     /// The played character lost health.
@@ -812,6 +814,7 @@ fn apply_effect(
         Effect::Heal(amount) => outcome.heal += amount,
         Effect::Say(dialog) => happened.push(Happened::Say(dialog)),
         Effect::Sound(name) => happened.push(Happened::Sound(name)),
+        Effect::Music(name) => happened.push(Happened::Music(name)),
         Effect::Teleport(name) => match places.find(&name) {
             Some(at) => {
                 outcome.teleport = Some(at);

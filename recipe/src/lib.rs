@@ -138,12 +138,36 @@ pub struct Extracted {
     pub fonts: Vec<(String, clockwork_core::font::BitmapFont)>,
     /// Output sounds by id.
     pub sounds: Vec<(String, clockwork_core::sound::Pcm)>,
+    /// Output music by id, rendered when it is played.
+    pub music: Vec<(String, Song)>,
     /// Output dialogs whose pages come from extracted text, by id.
     pub dialogs: Vec<(String, clockwork_core::ui::Dialog)>,
     /// Output scenes by id: nodes to add to the Workshop's scene.
     pub scenes: Vec<(String, SceneTemplate)>,
     /// The image each surface map says it covers: (surface map id, image id).
     pub surface_images: Vec<(String, String)>,
+}
+
+/// An m4a song in a ROM, read and checked but not yet rendered: rendering takes a while, and
+/// a game plays few of its songs at a time.
+#[derive(Clone)]
+pub struct Song {
+    pub rom: std::sync::Arc<[u8]>,
+    pub at: usize,
+    pub rate: u32,
+    pub seconds: Option<f32>,
+}
+
+impl std::fmt::Debug for Song {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Song(0x{:X}, {} Hz)", self.at, self.rate)
+    }
+}
+
+impl Song {
+    pub fn render(&self) -> Result<clockwork_core::sound::Music, String> {
+        clockwork_gba::m4a::render(&self.rom, self.at, self.rate, self.seconds)
+    }
 }
 
 /// Text from `bytes` starting at `at` up to the `end` byte (or `length` bytes): each byte the
@@ -356,7 +380,7 @@ pub fn run_from(
         run_step(step, s, rom, &mut made)?;
         observe(step, &made);
     }
-    outputs(recipe, &made, assets)
+    outputs(recipe, rom, &made, assets)
 }
 
 /// Runs one step on what was made before it.
@@ -882,6 +906,7 @@ fn run_step(step: usize, s: &Step, rom: &[u8], made: &mut Made) -> Result<(), Re
 /// What a recipe's outputs are, from what its steps made.
 fn outputs(
     recipe: &Recipe,
+    rom: &[u8],
     made: &Made,
     assets: &dyn AssetSource,
 ) -> Result<Extracted, RecipeError> {
@@ -901,6 +926,7 @@ fn outputs(
         ..
     } = made;
     let mut extracted = Extracted::default();
+    let mut shared_rom: Option<std::sync::Arc<[u8]>> = None;
     for output in &recipe.outputs {
         match output {
             Output::Image { id, from, .. } => {
@@ -1077,6 +1103,29 @@ fn outputs(
                 extracted.sounds.push((
                     id.clone(),
                     clockwork_core::sound::Pcm::decode(bytes, *format, *rate),
+                ));
+            }
+            Output::Music {
+                id,
+                song,
+                rate,
+                seconds,
+            } => {
+                clockwork_gba::m4a::Header::read(rom, *song as usize).map_err(|message| {
+                    RecipeError::Part {
+                        id: id.clone(),
+                        message,
+                    }
+                })?;
+                let rom = shared_rom.get_or_insert_with(|| rom.into()).clone();
+                extracted.music.push((
+                    id.clone(),
+                    Song {
+                        rom,
+                        at: *song as usize,
+                        rate: *rate,
+                        seconds: *seconds,
+                    },
                 ));
             }
             Output::Scene {

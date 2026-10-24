@@ -925,6 +925,18 @@ pub enum Output {
         #[serde(default)]
         format: crate::sound::SampleFormat,
     },
+    /// Music: the m4a song (the engine most GBA games play music with) whose header is at ROM
+    /// offset `song`, rendered at `rate` samples a second, at most `seconds` long. It repeats
+    /// from where the song loops; a song table's entries point to songs (see the agent's
+    /// `find_songs`).
+    Music {
+        id: String,
+        song: u32,
+        #[serde(default = "music_rate")]
+        rate: u32,
+        #[serde(default)]
+        seconds: Option<f32>,
+    },
     /// Text shown a page at a time in a box (see [`crate::ui::Dialog`]): written in place, or
     /// with `from`, the text of a buffer (see [`Step::Text`]), `lines_per_page` lines a page
     /// (a page each blank line without it).
@@ -952,6 +964,10 @@ pub enum Output {
         #[serde(default = "sixteen")]
         pixels_per_meter: f32,
     },
+}
+
+fn music_rate() -> u32 {
+    22050
 }
 
 fn sixteen() -> f32 {
@@ -983,6 +999,7 @@ impl Output {
             | Output::Game { .. }
             | Output::Font { .. }
             | Output::Sound { .. }
+            | Output::Music { .. }
             | Output::Dialog { .. }
             | Output::Sounds { .. } => None,
         }
@@ -1318,6 +1335,7 @@ impl Output {
             Output::Game { .. } => "Game",
             Output::Font { .. } => "Font",
             Output::Sound { .. } => "Sound",
+            Output::Music { .. } => "Music",
             Output::Dialog { .. } => "Dialog",
             Output::Sounds { .. } => "Sounds",
             Output::Scene { .. } => "Scene",
@@ -1347,6 +1365,7 @@ impl Output {
             | Output::Game { id, .. }
             | Output::Font { id, .. }
             | Output::Sound { id, .. }
+            | Output::Music { id, .. }
             | Output::Dialog { id, .. }
             | Output::Sounds { id, .. }
             | Output::Scene { id, .. } => id,
@@ -1376,6 +1395,7 @@ impl Output {
             | Output::Game { id, .. }
             | Output::Font { id, .. }
             | Output::Sound { id, .. }
+            | Output::Music { id, .. }
             | Output::Dialog { id, .. }
             | Output::Sounds { id, .. }
             | Output::Scene { id, .. } => *id = new.to_string(),
@@ -1427,6 +1447,7 @@ impl Output {
             | Output::Rules { .. }
             | Output::Game { .. }
             | Output::Dialog { from: None, .. }
+            | Output::Music { .. }
             | Output::Sounds { .. } => vec![],
             Output::Dialog {
                 from: Some(from), ..
