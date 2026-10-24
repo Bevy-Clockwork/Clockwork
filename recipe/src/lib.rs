@@ -624,6 +624,7 @@ fn run_step(step: usize, s: &Step, rom: &[u8], made: &mut Made) -> Result<(), Re
                 group,
                 door,
                 animation,
+                behavior,
                 code,
                 extent,
                 into,
@@ -695,6 +696,10 @@ fn run_step(step: usize, s: &Step, rom: &[u8], made: &mut Made) -> Result<(), Re
                                 })
                                 .transpose()?,
                             animation: animation.as_deref().map(fill).transpose()?,
+                            behavior: behavior
+                                .as_ref()
+                                .and_then(|b| b.pick(record, index))
+                                .map(str::to_string),
                             code: match code {
                                 Some(field) => {
                                     field.read(record).ok_or_else(|| short("code", index))?
@@ -1107,6 +1112,26 @@ fn outputs(
                             "node \"{}\" shows \"{}\", which is not an image, model or sprite of this plugin",
                             node.name,
                             node.item.as_deref().unwrap_or_default()
+                        ),
+                    });
+                }
+                let does = |behavior: &str| {
+                    recipe
+                        .outputs
+                        .iter()
+                        .any(|o| matches!(o, Output::Behavior { id, .. } if id == behavior))
+                };
+                if let Some(node) = scene
+                    .nodes
+                    .iter()
+                    .find(|n| n.behavior.as_deref().is_some_and(|b| !does(b)))
+                {
+                    return Err(RecipeError::Part {
+                        id: id.clone(),
+                        message: format!(
+                            "node \"{}\" does \"{}\", which is not a Behavior output of this plugin",
+                            node.name,
+                            node.behavior.as_deref().unwrap_or_default()
                         ),
                     });
                 }
@@ -2005,6 +2030,7 @@ mod tests {
                            when: [(field: (at: 0), values: [1])],
                            x: (at: 2, size: U16), y: (at: 4, size: U16), origin: (100, 0),
                            item: Some((by: Some((at: 1)), outputs: { 5: "room" })),
+                           behavior: Some((by: Some((at: 1)), outputs: { 7: "slime" })),
                            name: (text: "enemy {} #{index}", fields: [(at: 1)]),
                            animation: Some((text: "frame_{}", fields: [(at: 0)])),
                            group: Some((text: "Room")), code: Some((at: 1)), into: "enemies"),
@@ -2021,6 +2047,7 @@ mod tests {
                 outputs: [
                     Image(id: "room", from: "room", kind: Some(Area)),
                     Scene(id: "world", from: ["enemies", "doors"]),
+                    Behavior(id: "slime", behavior: Actor((radius: 0.4, states: [(name: "idle")]))),
                 ],
             )"#,
         )
@@ -2038,6 +2065,8 @@ mod tests {
         assert_eq!(scene.nodes[1].item, None);
         assert_eq!(scene.nodes[0].group.as_deref(), Some("Room"));
         assert_eq!(scene.nodes[0].animation.as_deref(), Some("frame_1"));
+        assert_eq!(scene.nodes[0].behavior, None);
+        assert_eq!(scene.nodes[1].behavior.as_deref(), Some("slime"));
         // (24 + 100, 8) pixels at 16 per meter.
         assert_eq!(scene.nodes[0].position, [7.75, 0.0, 0.5]);
         assert_eq!(

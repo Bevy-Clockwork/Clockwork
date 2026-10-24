@@ -28,7 +28,7 @@ pub enum Goal {
     Collect { item: String, count: u32 },
     /// Reaching the node with this name.
     Reach(String),
-    /// Destroying every target.
+    /// Beating every target, and every actor that can be beaten.
     DestroyAll,
     /// Anything a condition can say (see [`crate::behavior::Condition`]).
     When(crate::behavior::Condition),

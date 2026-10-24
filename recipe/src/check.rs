@@ -41,6 +41,16 @@ pub fn check(index: &AssetIndex, plugin: Option<&str>) -> Vec<Problem> {
                 });
             }
         }
+        if let Some(Output::Behavior {
+            behavior: Slot::Inline(clockwork_core::behavior::Behavior::Actor(actor)),
+            ..
+        }) = asset.output
+        {
+            problems.extend(actor.problems().into_iter().map(|message| Problem {
+                at: asset.at.clone(),
+                message,
+            }));
+        }
         if let Some(Output::Game { game, .. }) = asset.output
             && let Some(game) = follow(index, game, |o| match o {
                 Output::Game { game, .. } => Some(game),

@@ -13,8 +13,11 @@ use std::collections::{BTreeSet, HashSet};
 
 use bevy::math::{Vec2, Vec3};
 
-use super::NodeId;
-use crate::actions::Shape;
+use super::{
+    NodeId,
+    actors::{self, Mind},
+};
+use crate::{actions::Shape, controller::World};
 
 pub use clockwork_core::behavior::{Behavior, Condition, Effect, Facts, NodeBehavior};
 
@@ -51,6 +54,8 @@ pub struct LiveEntity {
     pub active: bool,
     /// Seconds left of its being-hit flash.
     pub flash: f32,
+    /// An actor's running state.
+    pub mind: Option<Box<Mind>>,
     fired: bool,
     inside: bool,
 }
@@ -114,6 +119,17 @@ pub enum Touch {
     },
 }
 
+/// An actor as it is shown: where, its animation (name, mirrored) and its state.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ActorPose<'a> {
+    pub node: NodeId,
+    pub at: Vec3,
+    pub animation: Option<(&'a str, bool)>,
+    pub state: &'a str,
+    /// Seconds in its state.
+    pub seconds: f32,
+}
+
 /// What a hit did.
 #[derive(Debug, Default, PartialEq)]
 pub struct HitOutcome {
@@ -136,6 +152,8 @@ pub struct Entities {
     pub act: Option<u8>,
     /// (projectile, node): a projectile hurts a target once.
     memo: HashSet<(u64, NodeId)>,
+    /// What actors did on entering a state, for the next [`Entities::touch`].
+    pending: Vec<Touch>,
 }
 
 /// The facts conditions are judged by: the entities' flags and gone nodes, and what the player
@@ -176,8 +194,11 @@ impl Entities {
             for b in &n.behaviors {
                 let health = match &b.behavior {
                     Behavior::Target { health, .. } => *health,
+                    Behavior::Actor(actor) => actor.health.unwrap_or(0.0),
                     _ => 0.0,
                 };
+                let mind = matches!(b.behavior, Behavior::Actor(_))
+                    .then(|| Box::new(Mind::new(n.at, n.id)));
                 live.push(LiveEntity {
                     node: n.id,
                     behavior: b.behavior.clone(),
@@ -189,6 +210,7 @@ impl Entities {
                     gone: false,
                     active: false,
                     flash: 0.0,
+                    mind,
                     fired: false,
                     inside: false,
                 });
@@ -208,6 +230,7 @@ impl Entities {
             flags: BTreeSet::new(),
             act: None,
             memo: HashSet::new(),
+            pending: Vec::new(),
         }
     }
 
@@ -282,10 +305,11 @@ impl Entities {
     pub fn blocked(&self, p: Vec2) -> bool {
         self.live.iter().any(|e| {
             e.working()
-                && matches!(
-                    e.behavior,
-                    Behavior::Solid { .. } | Behavior::Target { solid: true, .. }
-                )
+                && match &e.behavior {
+                    Behavior::Solid { .. } | Behavior::Target { solid: true, .. } => true,
+                    Behavior::Actor(actor) => actor.solid,
+                    _ => false,
+                }
                 && e.ground().distance(p) < e.behavior.radius()
         })
     }
@@ -295,10 +319,18 @@ impl Entities {
     pub fn apply_hit(&mut self, shape: &Shape, damage: f32, projectile: Option<u64>) -> HitOutcome {
         let mut outcome = HitOutcome::default();
         for e in &mut self.live {
-            let Behavior::Target { radius, drop, .. } = &e.behavior else {
-                continue;
+            let (radius, drop) = match &e.behavior {
+                Behavior::Target { radius, drop, .. } => (*radius, drop),
+                Behavior::Actor(actor) if actor.health.is_some() => (actor.radius, &actor.drop),
+                _ => continue,
             };
-            if !e.working() || !shape.touches(Vec2::new(e.at.x, e.at.z), *radius) {
+            if !e.working() || !shape.touches(Vec2::new(e.at.x, e.at.z), radius) {
+                continue;
+            }
+            if let Behavior::Actor(actor) = &e.behavior
+                && let Some(mind) = &e.mind
+                && actor.states.get(mind.state).is_some_and(|s| s.invulnerable)
+            {
                 continue;
             }
             if let Some(id) = projectile
@@ -309,6 +341,9 @@ impl Entities {
             outcome.landed = true;
             e.health -= damage;
             e.flash = FLASH;
+            if let (Behavior::Actor(actor), Some(mind)) = (&e.behavior, &mut e.mind) {
+                mind.hit(actor, shape.push_at(Vec2::new(e.at.x, e.at.z)));
+            }
             if e.health <= 0.0 {
                 outcome.destroyed.push((e.node, drop.clone()));
             }
@@ -319,12 +354,109 @@ impl Entities {
         outcome
     }
 
+    /// Steps every working actor by `dt`: its transitions, then its motion, in `world`, with the
+    /// player at `player`. Other behaviors of its node go where it goes. `carried` says how
+    /// many of an item the player has, for conditions.
+    pub fn act(
+        &mut self,
+        dt: f32,
+        player: Vec3,
+        world: &impl World,
+        carried: &dyn Fn(&str) -> u32,
+    ) {
+        // Transitions see the game as it is before any actor moves.
+        let mut next: Vec<(usize, usize)> = Vec::new();
+        let mut rolled: Vec<(usize, actors::Dice)> = Vec::new();
+        {
+            let judge = Judge {
+                entities: self,
+                carried,
+            };
+            for (i, e) in self.live.iter().enumerate() {
+                let (Behavior::Actor(actor), Some(mind)) = (&e.behavior, &e.mind) else {
+                    continue;
+                };
+                if !e.working() {
+                    continue;
+                }
+                let seen = actors::Seen {
+                    player,
+                    health: e.health,
+                    facts: &judge,
+                };
+                // Chance cues roll the actor's own dice, so play is the same each time.
+                let mut dice = mind.dice;
+                let mut roll = || dice.roll();
+                if let Some(state) = actors::next_state(actor, mind, e.at, &seen, dt, &mut roll) {
+                    next.push((i, state));
+                }
+                rolled.push((i, dice));
+            }
+        }
+        for (i, dice) in rolled {
+            if let Some(mind) = &mut self.live[i].mind {
+                mind.dice = dice;
+            }
+        }
+        for (i, state) in next {
+            let e = &mut self.live[i];
+            let (Behavior::Actor(actor), Some(mind)) = (&e.behavior, &mut e.mind) else {
+                continue;
+            };
+            let entered = &actor.states[state];
+            mind.enter(state, entered, e.at, player);
+            if let Some(effect) = &entered.enter {
+                self.pending.push(Touch::Trigger {
+                    node: e.node,
+                    effect: effect.clone(),
+                });
+            }
+        }
+        let mut moved: Vec<(NodeId, Vec3)> = Vec::new();
+        for e in self.live.iter_mut().filter(|e| e.working()) {
+            let (Behavior::Actor(actor), Some(mind)) = (&e.behavior, &mut e.mind) else {
+                continue;
+            };
+            mind.seen();
+            let at = mind.step(actor, e.at, player, world, dt);
+            if at != e.at {
+                e.at = at;
+                moved.push((e.node, at));
+            }
+        }
+        for (node, at) in moved {
+            for e in self.live.iter_mut().filter(|e| e.node == node) {
+                e.at = at;
+            }
+        }
+    }
+
+    /// Where every working actor is and what it shows: (node, position, animation and
+    /// mirroring, seconds in its state).
+    pub fn poses(&self) -> impl Iterator<Item = ActorPose<'_>> + '_ {
+        self.live.iter().filter(|e| e.working()).filter_map(|e| {
+            let (Behavior::Actor(actor), Some(mind)) = (&e.behavior, &e.mind) else {
+                return None;
+            };
+            let state = actor.states.get(mind.state);
+            Some(ActorPose {
+                node: e.node,
+                at: e.at,
+                animation: state
+                    .and_then(|s| s.animation.as_ref())
+                    .map(|p| p.get(mind.facing)),
+                state: state.map_or("", |s| s.name.as_str()),
+                seconds: mind.time,
+            })
+        })
+    }
+
     /// What the player at `at` (with a body of `radius`) touches now: within a behavior's
     /// radius on the ground and its reach up and down. Pickups are only offered: the caller
     /// decides whether the inventory takes them and then calls [`Entities::consume`].
     pub fn touch(&mut self, at: Vec3, radius: f32) -> Vec<Touch> {
         let ground = Vec2::new(at.x, at.z);
-        let mut touches = Vec::new();
+        let mut touches = std::mem::take(&mut self.pending);
         for e in &mut self.live {
             if !e.working() {
                 e.inside = false;
@@ -354,6 +486,17 @@ impl Entities {
                 }
                 Behavior::Hazard { damage, .. } if inside => {
                     touches.push(Touch::Hazard { damage: *damage });
+                }
+                Behavior::Actor(actor) if inside => {
+                    let contact = e
+                        .mind
+                        .as_ref()
+                        .and_then(|m| actor.states.get(m.state))
+                        .and_then(|s| s.contact)
+                        .unwrap_or(actor.contact);
+                    if contact > 0.0 {
+                        touches.push(Touch::Hazard { damage: contact });
+                    }
                 }
                 Behavior::Door { to, fade, .. } if inside && !e.inside && !to.is_empty() => {
                     touches.push(Touch::Door {

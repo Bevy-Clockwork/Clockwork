@@ -135,6 +135,9 @@ pub struct Placement {
     pub door: Option<Door>,
     /// The animation its sprite or model plays (the first without it).
     pub animation: Option<String>,
+    /// A `Behavior` output of the same plugin it does when played: an enemy's actor.
+    #[serde(default)]
+    pub behavior: Option<String>,
     /// What a MarkPlaces step writes into its cells.
     pub code: i64,
     /// Half width and height in pixels.
@@ -163,6 +166,9 @@ pub struct SceneNode {
     pub position: [f32; 3],
     pub door: Option<Door>,
     pub animation: Option<String>,
+    /// A `Behavior` output of the same plugin.
+    #[serde(default)]
+    pub behavior: Option<String>,
 }
 
 impl SceneTemplate {
@@ -182,6 +188,7 @@ impl SceneTemplate {
                     position: [p.x * scale, 0.0, p.y * scale],
                     door: p.door.clone(),
                     animation: p.animation.clone(),
+                    behavior: p.behavior.clone(),
                 })
                 .collect(),
         }
@@ -263,6 +270,7 @@ mod tests {
             y,
             door: None,
             animation: None,
+            behavior: None,
             code,
             half,
         };

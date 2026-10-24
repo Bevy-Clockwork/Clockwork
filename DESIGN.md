@@ -669,7 +669,35 @@ boots, ocarina, rods, bottles, passive items).
 
 Not yet: a gizmo for rotation about other axes (nodes turn about the vertical axis only), several
 named scenes in a project, behaviors that react to each other (a trigger that opens a door),
-enemies that move or attack, and exporting for other platforms than the one the editor runs on.
+and exporting for other platforms than the one the editor runs on.
+
+### 7.10.1 Actors (implemented)
+
+Enemies, NPCs and things that move are **actors** (`clockwork_core::actor`): a behavior that is
+a small state machine of plain data, so the agent translates a game's enemy code (its state
+functions, timers, distance checks) into states and numbers rather than code.
+
+- **A state** says how the actor moves (`Still`, `Wander`, `Chase`, `Flee`, `Charge`, `Home`,
+  `Patrol`), how fast (times the actor's speed), what it shows (one animation or one per
+  facing), its contact damage, whether hits hurt it, an effect on entering it (any trigger
+  effect: a sound, a dialog, a flag) and its transitions.
+- **Transitions** are checked every step in order, on cues: the player near or far, time in
+  the state, hurt, health below, arrived, blocked, chance per second, any game condition, and
+  `Not`, `All`, `Any`. Random numbers come from each actor's own seed, so a play is the same
+  every time from the same start (tests and the agent can rely on it).
+- **Runtime:** `clockwork_runtime::play::actors` steps them inside `Play::advance` at the fixed
+  rate, on the level's ground (walls and holes stop them, with sliding; they don't block each
+  other). Hits hurt them with a push along the swing or out from a blast; touching them hurts
+  the player; beaten ones drop their item and count for `DestroyAll`; their node's other
+  behaviors go where they go.
+- **From the game's tables:** a `Places` step's `behavior` picks the `Behavior` output each
+  placement does by a record field, like `item`, so a room's enemies arrive with their actors;
+  placed nodes follow the asset as it changes.
+- **Editor:** the Inspector edits an actor's numbers and its states as RON (parsed as typed);
+  Play moves actor nodes and plays their state's animation.
+
+Not yet: actors that throw projectiles or use actions, actors blocking each other, flying and
+jumping motions, and paths around walls (they walk straight and slide).
 
 ### 7.11 Abilities and composition plugins (implemented)
 
@@ -897,6 +925,7 @@ M1 and M2 need no AI on purpose. They build the foundation the agent stands on.
 | 2026-10-21 | Library games can be linked to a decompilation repository; known decomps are suggested by ROM hash from `knowledge/decomps.ron`. The agent (M3) uses the linked decomp as its main source | §6 |
 | 2026-10-21 | Game-specific knowledge lives in plugin data, never in Clockwork code: recipes use generic steps (`Lookup`), and what a game's codes mean is a code → property table in the plugin (`Surfaces` output) | §4.4, §5.1 |
 | 2026-10-23 | Nothing names a game: collision is read by a data-described `CollisionTriangles` step (replacing SM64-only `N64Collision`), known decomps come from content folders, the roll slot is the `dodge` and the boomerang motion `Return` (old names still load) | §4, §5 |
+| 2026-10-24 | Enemies and NPCs are `Actor` behaviors: state machines of data (motions, cues, effects), never per-game code; Play's simulation lives in `clockwork_runtime::play` | §7.6, §7.10.1 |
 | 2026-10-24 | Where a game places things is read from its record tables by a generic `Places` step, never written into a recipe; `MarkPlaces` turns placements into surface cells and a `Scene` output into Workshop nodes. GBA background steps take `depth: Bpp8` for 256-color modes. A `Surfaces` output names the image it covers (`image`), so maps of equal size don't get each other's collision | §5.1, §7.2 |
 
 ## 11. First agent test (2026-10-21)

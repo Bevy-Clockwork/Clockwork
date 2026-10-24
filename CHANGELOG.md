@@ -14,6 +14,13 @@
   group.
 - `depth: Bpp8` on `GbaMetatiles` and `GbaMetatileMap` for 256-color backgrounds.
 - `image` on `Surfaces` outputs: the image a surface map covers.
+- `Actor` behaviors: enemies, NPCs and moving things as state machines of plain data (how
+  each state moves: still, wander, chase, flee, charge, home or patrol; its animation, contact
+  damage and entry effect; and when it changes: near, far, after, hurt, health, arrived,
+  blocked, chance or a game condition). They take hits with knockback, hurt on contact, drop
+  items and count for `DestroyAll`. The Inspector edits their numbers and states.
+- `behavior` on `Places` steps: the `Behavior` output each placement does, picked by a record
+  field like `item`, so a room's enemies come with their actors.
 - `clockwork_runtime::play`: Play's simulation (the played character, its actions and items,
   the scene's behaviors, rules and goals) runs without a window, so it can be tested headless.
   The editor's Play mode drives it.

@@ -254,3 +254,88 @@ fn vitals_rest_after_a_hit_and_run_out() {
     v.heal(5.0);
     assert_eq!(v.health, 2.0);
 }
+
+/// An enemy that waits until the player is within 3 m, then chases and hurts on contact.
+fn chaser() -> Behavior {
+    Behavior::Actor(Box::new(
+        ron::from_str(
+            r#"(
+                health: Some(2.0), radius: 0.4, contact: 1.0, speed: 2.0, knockback: 1.0,
+                states: [
+                    (name: "wait", next: [(to: "chase", when: Near(3.0))]),
+                    (name: "chase", motion: Chase, animation: Some(One("run")),
+                     enter: Some(Set("spotted")),
+                     next: [(to: "stunned", when: Hurt)]),
+                    (name: "stunned", contact: Some(0.0), next: [(to: "chase", when: After(0.5))]),
+                ],
+            )"#,
+        )
+        .unwrap(),
+    ))
+}
+
+#[test]
+fn an_actor_chases_the_player_and_hurts_on_contact() {
+    let map = floor();
+    let nodes = vec![placed(
+        2,
+        "Moblin",
+        Vec3::new(5.0, 0.0, 0.0),
+        vec![chaser()],
+    )];
+    let mut play = play(nodes, Rules::default());
+    walk(&mut play, &map, &nowhere, Vec2::ZERO, 0.5);
+    assert_eq!(
+        play.entities.live[0].at,
+        Vec3::new(5.0, 0.0, 0.0),
+        "too far to notice"
+    );
+    // Coming within 3 m: it starts after the player, raising its flag.
+    walk(&mut play, &map, &nowhere, Vec2::X, 0.6);
+    assert!(play.entities.flags.contains("spotted"));
+    let happened = walk(&mut play, &map, &nowhere, Vec2::ZERO, 1.0);
+    assert!(happened.contains(&Happened::Hurt));
+    let pose = play.entities.poses().next().unwrap();
+    assert_eq!(
+        (pose.state, pose.animation),
+        ("chase", Some(("run", false)))
+    );
+    assert!(pose.at.x < 5.0, "it came to the player: {}", pose.at);
+}
+
+#[test]
+fn beating_every_actor_wins_a_destroy_all_game() {
+    let map = floor();
+    let nodes = vec![placed(
+        2,
+        "Moblin",
+        Vec3::new(1.0, 0.0, 0.0),
+        vec![chaser()],
+    )];
+    let rules = Rules {
+        goal: Some(Goal::DestroyAll),
+        ..Default::default()
+    };
+    let mut play = play(nodes, rules);
+    // Near enough: it is chasing when the bomb goes off just west of it.
+    walk(&mut play, &map, &nowhere, Vec2::ZERO, STEP);
+    let x = play.entities.live[0].at.x;
+    let hit = crate::actions::Shape::Circle {
+        center: Vec2::new(x - 0.3, 0.0),
+        radius: 0.5,
+    };
+    let first = play.entities.apply_hit(&hit, 1.0, None);
+    assert!(first.landed && first.destroyed.is_empty());
+    // Stunned, then pushed back east by the blast.
+    walk(&mut play, &map, &nowhere, Vec2::ZERO, 0.1);
+    assert_eq!(play.entities.poses().next().unwrap().state, "stunned");
+    assert!(play.entities.live[0].at.x > x);
+    let at = play.entities.live[0].at;
+    let hit = crate::actions::Shape::Circle {
+        center: Vec2::new(at.x, at.z),
+        radius: 0.5,
+    };
+    assert_eq!(play.entities.apply_hit(&hit, 1.0, None).destroyed.len(), 1);
+    let happened = walk(&mut play, &map, &nowhere, Vec2::ZERO, STEP);
+    assert!(matches!(happened.last(), Some(Happened::Won(_))));
+}

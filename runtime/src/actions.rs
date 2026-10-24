@@ -56,6 +56,15 @@ impl Shape {
         }
     }
 
+    /// Which way a hit by the shape pushes something at `point`: along a box's direction (a
+    /// swing pushes the way it swings), out from a circle's center (an explosion).
+    pub fn push_at(&self, point: Vec2) -> Vec2 {
+        match *self {
+            Shape::Box { dir, .. } => dir.normalize_or_zero(),
+            Shape::Circle { center, .. } => (point - center).normalize_or_zero(),
+        }
+    }
+
     /// Whether a disc of `radius` at `point` touches the shape.
     pub fn touches(&self, point: Vec2, radius: f32) -> bool {
         match *self {

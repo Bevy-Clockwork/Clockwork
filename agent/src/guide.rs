@@ -232,7 +232,9 @@ Places(from: "rom", at: 0x1234, stride: 16, until: Some((field: (at: 0), values:
     sizes: {value: (half_w, half_h)}))` says how far it reaches. `animation: Some((text:
     "frame_{}", fields: [(at: 3)]))` names the animation each placement plays: objects that
     show one frame chosen by their record (give the sprite a one-keyframe animation per frame,
-    from a Literal of keyframe records) or that start in another state.
+    from a Literal of keyframe records) or that start in another state. `behavior:
+    Some((by: Some((at: 1)), outputs: {3: "octorok", 7: "moblin"}))` picks, like `item`, the
+    `Behavior` output each placement does when played: an enemy's `Actor` by its kind field.
 MarkPlaces(from: "forest_enemies", width: 64, height: 40, cell_size: 16, origin: (2048, 1024), into: "cells")
     Marks the cells each placement covers with its `code` (a field of its record, or its
     number from 1): a grid for a Surfaces output, so the map shows where enemies, doors and
@@ -434,7 +436,37 @@ radius, solid, drop) | Pickup(item, count, radius) | Trigger(radius, effect, onc
 Checkpoint(radius) | Solid(radius) | Hazard(radius, damage) | Door(radius, to: "node name",
 fade))`, with trigger effects `Message`, `Teleport`, `Give`, `Restart`, `Hurt(amount)`,
 `Heal(amount)`, `Set("flag")`, `Clear("flag")` and `All([...])` (built-ins: `builtin/target`,
-`builtin/checkpoint`, `builtin/post`, `builtin/spikes`, `builtin/heart`). A scene node has a
+`builtin/checkpoint`, `builtin/post`, `builtin/spikes`, `builtin/heart`).
+
+Enemies, NPCs and moving things are `Actor((...))` behaviors: a state machine you translate
+from the game's own code (its state functions, timers and distance checks), with the game's
+numbers converted to meters and seconds:
+
+Behavior(id: "octorok", behavior: Actor((
+    health: Some(1.0), radius: 0.4, solid: true, contact: 0.5, speed: 1.0, knockback: 0.8,
+    drop: Some(("rupee", 1)),
+    states: [
+        (name: "walk", motion: Wander(radius: 3.0, pause: 0.5), animation: Some(Facing((
+            north: (name: "walk_up"), east: (name: "walk_side", flip_x: true),
+            south: (name: "walk_down"), west: (name: "walk_side")))),
+         next: [(to: "aim", when: All([Near(5.0), Chance(0.5)]))]),
+        (name: "aim", motion: Still, enter: Some(Sound("tmc-sounds/spit")),
+         next: [(to: "walk", when: After(0.8)), (to: "hurt", when: Hurt)]),
+        (name: "hurt", contact: Some(0.0), invulnerable: true,
+         next: [(to: "walk", when: After(0.4))]),
+    ],
+)))
+    It starts in its first state. Motions: `Still`, `Wander(radius, pause)` (random points near
+    where it was placed), `Chase`, `Flee`, `Charge` (straight at where the player was when the
+    state began, until blocked), `Home`, `Patrol(points: [(x, z), ...], looped)` (meters from
+    where it was placed). A state's `speed` multiplies the actor's; `contact` overrides its
+    contact damage (0 while stunned); `invulnerable` ignores hits; `enter` is a trigger effect
+    on entering; `animation` is `One("name")` or `Facing(...)` per direction it moves. The first
+    transition whose cue holds wins, checked every 1/60 s: `Near(m)`, `Far(m)`, `After(s)`,
+    `Hurt`, `HealthBelow(h)`, `Arrived` (a wander point, home or a patrol's end), `Blocked` (a
+    wall or hole stopped it), `Chance(per_second)`, `When(condition)`, `Not`, `All`, `Any`.
+    Actors without `health` can't be beaten; beaten actors count for `DestroyAll`. Transitions
+    to states the actor doesn't have are reported when the plugin is saved. A scene node has a
 list of behaviors, each working only while its condition holds, and can appear only once one
 does: conditions are `Has(item, count)`, `Flag("name")`, `Gone("node name")` (destroyed or
 picked up), `Act(n)` (the current act is n), `Not(...)`, `All([...])` and `Any([...])`.

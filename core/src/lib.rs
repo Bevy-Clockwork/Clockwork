@@ -6,6 +6,7 @@
 
 pub mod ability;
 pub mod action;
+pub mod actor;
 pub mod asset;
 pub mod behavior;
 pub mod camera;

@@ -34,14 +34,11 @@ pub struct PlayWorld<'a> {
     pub entities: &'a Entities,
 }
 
-impl World for PlayWorld<'_> {
+impl World for Level<'_> {
     fn ground(&self, x: f32, z: f32) -> Ground {
-        if self.entities.blocked(Vec2::new(x, z)) {
-            return Ground::Wall;
-        }
         // The highest area under the point decides; outside every area there is nothing.
         let mut best: Option<(f32, Ground)> = None;
-        for area in &self.level.areas {
+        for area in &self.areas {
             let local = area.to_local.transform_point3(Vec3::new(x, area.height, z));
             let u = (local.x + area.size.x / 2.0) / area.size.x;
             let v = (local.z + area.size.y / 2.0) / area.size.y;
@@ -64,13 +61,10 @@ impl World for PlayWorld<'_> {
     }
 
     fn ground_at(&self, x: f32, y: f32, z: f32) -> Ground {
-        if self.entities.blocked(Vec2::new(x, z)) {
-            return Ground::Wall;
-        }
         let flat = self.ground(x, z);
         // The highest floor of any 3D area at the body's height; holes only if there is no floor.
         let mut terrain: Option<Ground> = None;
-        for found in self.level.terrains.iter().filter_map(|t| t.floor(x, y, z)) {
+        for found in self.terrains.iter().filter_map(|t| t.floor(x, y, z)) {
             terrain = match (terrain, found) {
                 (Some(Ground::Floor(a)), Ground::Floor(b)) => Some(Ground::Floor(a.max(b))),
                 (Some(Ground::Floor(a)), _) => Some(Ground::Floor(a)),
@@ -87,10 +81,30 @@ impl World for PlayWorld<'_> {
     }
 
     fn push_out(&self, position: Vec3, radius: f32) -> Vec3 {
-        self.level
-            .terrains
+        self.terrains
             .iter()
             .fold(position, |p, t| t.push_out(p, radius))
+    }
+}
+
+/// The level, with what the scene's behaviors put in the way.
+impl World for PlayWorld<'_> {
+    fn ground(&self, x: f32, z: f32) -> Ground {
+        if self.entities.blocked(Vec2::new(x, z)) {
+            return Ground::Wall;
+        }
+        self.level.ground(x, z)
+    }
+
+    fn ground_at(&self, x: f32, y: f32, z: f32) -> Ground {
+        if self.entities.blocked(Vec2::new(x, z)) {
+            return Ground::Wall;
+        }
+        self.level.ground_at(x, y, z)
+    }
+
+    fn push_out(&self, position: Vec3, radius: f32) -> Vec3 {
+        self.level.push_out(position, radius)
     }
 }
 
