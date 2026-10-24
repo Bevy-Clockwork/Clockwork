@@ -194,20 +194,55 @@ impl Library {
     }
 }
 
-/// What the Library remembers about an imported file, so the next start can skip reading and
-/// hashing it while the file is unchanged (same length and modification time). Holds the
-/// header's title and code and the hash, never game data.
+/// A game the Library remembers: one record of `library.ron`. Holds where its file is, what was
+/// learned from the file when it was last read (its hash and header, trusted while the file's
+/// length and modification time are unchanged) and what the user added: the game's full name
+/// and its decompilation. Never game data.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct KnownRom {
+pub struct Game {
     pub path: PathBuf,
-    /// The file's length and modification time (seconds and nanoseconds since 1970).
-    pub file_len: u64,
-    pub modified: (u64, u32),
+    /// Empty if the file was never read.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub sha1: String,
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub size: u64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub platform: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub title: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub game_code: String,
+    /// The file's length and modification time (seconds and nanoseconds since 1970) when it
+    /// was read; none for a file that is always read again (a cue sheet).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<(u64, (u64, u32))>,
+    /// Its No-Intro name, once identified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// The decompilation repository linked to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decomp: Option<String>,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
+}
+
+impl Game {
+    /// A game known only by where its file is.
+    pub fn at(path: PathBuf) -> Self {
+        Self {
+            path,
+            sha1: String::new(),
+            size: 0,
+            platform: String::new(),
+            title: String::new(),
+            game_code: String::new(),
+            file: None,
+            name: None,
+            decomp: None,
+        }
+    }
 }
 
 /// The length and modification time of a file whose contents can be trusted to change only
@@ -229,43 +264,41 @@ fn stamp(path: &Path) -> Option<(u64, (u64, u32))> {
 }
 
 impl Library {
-    /// What to remember about `entry` for [`Library::import_known`], if its file can be
-    /// recognized again without reading it.
-    pub fn known(&self, entry: &LibraryEntry) -> Option<KnownRom> {
-        let (file_len, modified) = stamp(&entry.path)?;
-        Some(KnownRom {
+    /// The record of `entry` (without a name or decomp), with its file's stamp if its file can
+    /// be recognized again without reading it.
+    pub fn game(&self, entry: &LibraryEntry) -> Game {
+        Game {
             path: entry.path.clone(),
-            file_len,
-            modified,
             sha1: entry.sha1.clone(),
             size: entry.size,
             platform: entry.info.platform.to_string(),
             title: entry.info.title.clone(),
             game_code: entry.info.game_code.clone(),
-        })
+            file: stamp(&entry.path),
+            name: None,
+            decomp: None,
+        }
     }
 
-    /// Imports `path`, trusting what `known` remembers about it while the file's length and
-    /// modification time are unchanged and its platform is registered; otherwise reads it.
-    pub fn import_known(
-        &mut self,
-        path: impl AsRef<Path>,
-        known: &[KnownRom],
-    ) -> Result<&LibraryEntry, ImportError> {
-        let path = path.as_ref();
-        let remembered = known.iter().find(|k| k.path == path).and_then(|k| {
-            let platform = self.platforms.iter().find(|p| p.id() == k.platform)?;
-            (stamp(path)? == (k.file_len, k.modified)).then(|| LibraryEntry {
+    /// Imports a remembered game, trusting its record while its file's length and modification
+    /// time are unchanged and its platform is registered; otherwise reads the file.
+    pub fn import_game(&mut self, game: &Game) -> Result<&LibraryEntry, ImportError> {
+        let path = game.path.as_path();
+        let remembered = self
+            .platforms
+            .iter()
+            .find(|p| !game.sha1.is_empty() && p.id() == game.platform)
+            .filter(|_| game.file.is_some() && stamp(path) == game.file)
+            .map(|platform| LibraryEntry {
                 path: path.to_path_buf(),
-                sha1: k.sha1.clone(),
-                size: k.size,
+                sha1: game.sha1.clone(),
+                size: game.size,
                 info: RomInfo {
                     platform: platform.id(),
-                    title: k.title.clone(),
-                    game_code: k.game_code.clone(),
+                    title: game.title.clone(),
+                    game_code: game.game_code.clone(),
                 },
-            })
-        });
+            });
         let Some(entry) = remembered else {
             return self.import(path);
         };
@@ -305,20 +338,18 @@ mod tests {
 
         let mut first = Library::new().with_platform(Gba);
         let entry = first.import(&path).unwrap().clone();
-        let mut known = first.known(&entry).unwrap();
+        let mut known = first.game(&entry);
+        assert!(known.file.is_some());
         // A remembered hash that differs from the file's proves the file wasn't read.
         known.sha1 = "remembered".into();
         let mut second = Library::new().with_platform(Gba);
-        assert_eq!(
-            second.import_known(&path, &[known.clone()]).unwrap().sha1,
-            "remembered"
-        );
+        assert_eq!(second.import_game(&known).unwrap().sha1, "remembered");
 
         // A changed file is read again.
         rom.extend([0; 0x40]);
         std::fs::write(&path, &rom).unwrap();
         let mut third = Library::new().with_platform(Gba);
-        let reread = third.import_known(&path, &[known]).unwrap();
+        let reread = third.import_game(&known).unwrap();
         assert_eq!(reread.sha1, sha1_hex(&rom));
         assert_eq!(reread.size, rom.len() as u64);
         let _ = std::fs::remove_dir_all(&dir);

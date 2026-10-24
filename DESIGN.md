@@ -348,7 +348,12 @@ them there. Ghidra is listed but not wired into any tool yet.
 
 A Godot-style composer for combining plugins:
 
-- Browse the Library and installed plugins.
+- Browse the Library and installed plugins. The Library is saved as `library.ron` with one
+  record per game (`clockwork_library::Game`: its file and what was learned from it, its full
+  name and its decompilation), shared with the agent. A game whose file can't be read stays in
+  the Library: the toolbar's **⚠ missing** menu lists each with where it was, **Locate…** (pick
+  the file where it is now; the same game by hash or a file at its old place counts as found)
+  and **Forget**.
 - **Resolve dependencies:** show unmet `requires`, choose providers or stubs.
 - **Resolve conflicts:** competing providers, scale mismatches, input conflicts.
 - Choose **dimension adapters** when mixing 2D and 3D content.

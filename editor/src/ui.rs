@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use bevy::{
     camera::Viewport,
     prelude::*,
@@ -46,6 +48,8 @@ pub struct Dialogs {
     cover: Option<(String, Task<Option<rfd::FileHandle>>)>,
     /// The title of a game being exported, and the dialog choosing where it goes.
     export: Option<(String, Task<Option<rfd::FileHandle>>)>,
+    /// Where a missing game was, and the dialog choosing where it is now.
+    locate: Option<(PathBuf, Task<Option<rfd::FileHandle>>)>,
 }
 
 /// Things the UI asked for this frame, applied after drawing.
@@ -55,6 +59,8 @@ struct Actions {
     pick_cover: Option<String>,
     reset_cover: Option<String>,
     remove: Option<usize>,
+    /// Find a missing game's file (by where it was).
+    locate: Option<PathBuf>,
     /// Export the scene as a game, with this title.
     export: Option<String>,
     /// Commands from menus, the palette and shortcuts.
@@ -284,6 +290,19 @@ pub fn editor_ui(
                     .pick_files(),
             ),
         );
+    }
+    if let Some(was) = actions.locate.take()
+        && dialogs.locate.is_none()
+    {
+        let mut dialog = rfd::AsyncFileDialog::new()
+            .set_title("Where is this game now?")
+            .add_filter("Game images and executables", &ROM_EXTENSIONS)
+            .add_filter("Zip archives", &["zip"])
+            .add_filter("All files", &["*"]);
+        if let Some(name) = was.file_name() {
+            dialog = dialog.set_file_name(name.to_string_lossy());
+        }
+        dialogs.locate = Some((was, AsyncComputeTaskPool::get().spawn(dialog.pick_file())));
     }
     if let Some(title) = actions.export
         && dialogs.export.is_none()
@@ -601,6 +620,18 @@ fn poll_dialogs(
                 }
                 Err(e) => state.log(LogLevel::Error, format!("Export failed: {e}")),
             }
+        }
+    }
+    if let Some(picked) = dialogs
+        .locate
+        .as_mut()
+        .and_then(|(_, t)| block_on(poll_once(t)))
+    {
+        let (was, _) = dialogs.locate.take().unwrap();
+        if let Some(file) = picked
+            && let Some(i) = state.missing.iter().position(|g| g.path == was)
+        {
+            state.locate(i, file.path().to_path_buf());
         }
     }
     if let Some(picked) = dialogs.roms.as_mut().and_then(|t| block_on(poll_once(t))) {
@@ -989,6 +1020,49 @@ fn library_screen(
         });
 }
 
+/// The games whose file couldn't be read, each with where it was, Locate… and Forget.
+fn missing_menu(ui: &mut egui::Ui, state: &mut EditorState, actions: &mut Actions) {
+    let label = RichText::new(format!("⚠ {} missing", state.missing.len()))
+        .small()
+        .color(theme::WARN);
+    let mut forget = None;
+    ui.menu_button(label, |ui| {
+        ui.set_min_width(340.0);
+        ui.label(kit::dim(
+            "Their files couldn't be read this time (a drive not plugged in, a moved file), \
+             so they stay in the Library and come back once they can be.",
+        ));
+        ui.add_space(4.0);
+        for (i, game) in state.missing.iter().enumerate() {
+            ui.separator();
+            ui.label(RichText::new(state.missing_title(game)).color(theme::PARCHMENT));
+            ui.label(kit::hint(game.path.display().to_string()));
+            ui.horizontal(|ui| {
+                if ui
+                    .button("Locate…")
+                    .on_hover_text("Pick the game's file where it is now")
+                    .clicked()
+                {
+                    actions.locate = Some(game.path.clone());
+                    ui.close();
+                }
+                if ui
+                    .button("Forget")
+                    .on_hover_text("Take it out of the Library")
+                    .clicked()
+                {
+                    forget = Some(i);
+                }
+            });
+        }
+    })
+    .response
+    .on_hover_text("Games whose file couldn't be read: locate or forget them");
+    if let Some(i) = forget {
+        state.forget_missing(i);
+    }
+}
+
 /// The Library's toolbar: title and count, search, platform filter, sort, layout and Import.
 fn library_toolbar(
     ui: &mut egui::Ui,
@@ -1027,28 +1101,8 @@ fn library_toolbar(
                     },
                     theme::PARCHMENT_DIM,
                 );
-                if !state.missing_roms.is_empty() {
-                    let paths: Vec<String> = state
-                        .missing_roms
-                        .iter()
-                        .map(|p| p.display().to_string())
-                        .collect();
-                    let forget = kit::pill(
-                        ui,
-                        &format!("{} missing", state.missing_roms.len()),
-                        theme::WARN,
-                    )
-                    .interact(egui::Sense::click())
-                    .on_hover_text(format!(
-                        "Couldn't be read this time, so they stay remembered:\n{}\n\nClick to forget them.",
-                        paths.join("\n")
-                    ))
-                    .clicked();
-                    if forget {
-                        state.missing_roms.clear();
-                        state.log(LogLevel::Info, "Forgot the missing ROMs");
-                        state.save();
-                    }
+                if !state.missing.is_empty() {
+                    missing_menu(ui, state, actions);
                 }
                 ui.add_space(14.0);
                 if platforms.len() > 1 {
