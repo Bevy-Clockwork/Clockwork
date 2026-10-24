@@ -203,6 +203,53 @@ impl Doc {
         Some(text)
     }
 
+    /// The note on `item` (an element of a sequence written on its own line): the `//` comment
+    /// lines right above it, up to a blank line or a section header (`// ==`, `// --`, `// ##`),
+    /// without their slashes; and the span of those lines (empty, at the item's line, when there
+    /// are none).
+    pub fn note(&self, item: &Node) -> (Range<usize>, String) {
+        let line_start = self.text[..item.span.start]
+            .rfind('\n')
+            .map_or(0, |i| i + 1);
+        let mut start = line_start;
+        let mut lines = Vec::new();
+        while start > 0 {
+            let above = self.text[..start - 1].rfind('\n').map_or(0, |i| i + 1);
+            let line = self.text[above..start - 1].trim();
+            let Some(comment) = line.strip_prefix("//") else {
+                break;
+            };
+            let comment = comment.trim();
+            if ["==", "--", "##"].iter().any(|m| comment.starts_with(m)) {
+                break;
+            }
+            lines.push(comment.to_string());
+            start = above;
+        }
+        lines.reverse();
+        (start..line_start, lines.join("\n"))
+    }
+
+    /// The text with the note on `item` (see [`Doc::note`]) replaced by `note`, written as `//`
+    /// lines indented like the item; an empty note takes the lines away.
+    pub fn with_note(&self, item: &Node, note: &str) -> String {
+        let (span, _) = self.note(item);
+        let indent = indent_at(&self.text, item.span.start);
+        let lines: String = note
+            .lines()
+            .map(str::trim_end)
+            .skip_while(|l| l.trim().is_empty())
+            .map(|l| {
+                if l.trim().is_empty() {
+                    format!("{indent}//\n")
+                } else {
+                    format!("{indent}// {l}\n")
+                }
+            })
+            .collect();
+        self.replaced(span, &lines)
+    }
+
     /// The text without `item` (an element of a sequence): its line goes too when nothing else
     /// is on it, and so does its comma.
     pub fn removed(&self, item: &Node) -> String {
@@ -649,6 +696,26 @@ impl Parser<'_> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_note_is_the_comment_right_above_an_item() {
+        let text = "(steps: [\n    // == Tiles ==\n    // From the gfx table.\n    // Compressed.\n    A(x: 1),\n\n    B(x: 2),\n])";
+        let doc = Doc::parse(text).unwrap();
+        let items = doc.root.field("steps").unwrap().items();
+        assert_eq!(doc.note(&items[0]).1, "From the gfx table.\nCompressed.");
+        assert_eq!(doc.note(&items[1]).1, "");
+
+        let changed = doc.with_note(&items[0], "One line");
+        assert!(changed.contains("// == Tiles ==\n    // One line\n    A(x: 1)"));
+        let doc = Doc::parse(changed).unwrap();
+        let items = doc.root.field("steps").unwrap().items();
+        let changed = doc.with_note(&items[1], "New\nnote");
+        assert!(changed.contains("\n    // New\n    // note\n    B(x: 2)"));
+        let doc = Doc::parse(changed).unwrap();
+        let items = doc.root.field("steps").unwrap().items();
+        let gone = doc.with_note(&items[0], "");
+        assert!(gone.contains("// == Tiles ==\n    A(x: 1)"));
+    }
+
     use super::*;
     use clockwork_core::recipe::Recipe;
 

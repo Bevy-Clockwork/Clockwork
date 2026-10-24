@@ -629,6 +629,10 @@ pub enum Edit {
     Add(String),
     /// Adds a block of steps as a closed group, by its name: `AddBlock("GBA tileset")`.
     AddBlock(String),
+    /// Sets the note above a node: `Note("step 3", "From the gfx table")`.
+    Note(String, String),
+    /// Replaces the whole text, as typing it in the Text tab does.
+    Text(String),
     Remove(String),
     /// Runs a step later (`true`) or earlier; moves an output down or up.
     Move(String, bool),
@@ -690,6 +694,10 @@ enum Change {
     /// Adds a block (an index into [`blocks::BLOCKS`]): its steps after the selected step (or
     /// last), its outputs last, all in a new closed group at `at`.
     AddBlock { block: usize, at: Pos2 },
+    /// The note above a node (see [`Doc::note`]).
+    Note { node: RNode, note: String },
+    /// A whole new text, typed in the Text tab.
+    Text(String),
     /// Removes these steps and outputs.
     Remove(Vec<RNode>),
     /// Swaps a step or output with the one after it (`later`) or before it.
@@ -797,6 +805,12 @@ pub struct RecipeGraph {
     focus: Option<RNode>,
     /// The group the Inspector shows, when a closed group was selected last.
     focus_group: Option<GroupId>,
+    /// The Text tab's text while it doesn't parse (or is being typed), and where to put its
+    /// cursor next (a byte in it).
+    text_buffer: Option<String>,
+    text_jump: Option<usize>,
+    /// Whether the Text tab was shown last, not the graph.
+    text_shown: bool,
     /// What is typed as a group's new name, while it is renamed.
     /// The nodes selected as last drawn, to tell when the selection changes.
     selection: Vec<NodeId>,
@@ -909,6 +923,9 @@ impl RecipeGraph {
             nav: Navigator::default(),
             focus: None,
             focus_group: None,
+            text_buffer: None,
+            text_jump: None,
+            text_shown: false,
             selection: Vec::new(),
             add_query: String::new(),
             add_at: None,
@@ -1310,6 +1327,8 @@ impl RecipeGraph {
         let mut places = self.places();
         let field = match &change {
             Change::Replace { field, .. } => field.clone(),
+            // Typing is undone at once, as a change to one field.
+            Change::Text(_) => Some((RNode::Step(usize::MAX), "text".into())),
             _ => None,
         };
         let mut focus = self.focus;
@@ -1507,6 +1526,14 @@ impl RecipeGraph {
                 self.focus_group = Some(group);
                 focus = None;
                 doc.text
+            }
+            Change::Note { node, note } => {
+                let item = Self::node_doc(&self.doc, node).ok_or("no such node")?;
+                self.doc.with_note(item, &note)
+            }
+            Change::Text(text) => {
+                places = self.places_for(&text);
+                text
             }
             Change::Remove(mut nodes) => {
                 // Last first, so the places of the others don't change.
@@ -1764,6 +1791,14 @@ impl RecipeGraph {
                     to: (to, inp),
                 }
             }
+            Edit::Note(node, note) => Change::Note {
+                node: node_named(node)?,
+                note: note.clone(),
+            },
+            Edit::Text(text) => {
+                parse(text)?;
+                Change::Text(text.clone())
+            }
             Edit::AddBlock(name) => {
                 let block = blocks::BLOCKS
                     .iter()
@@ -1913,6 +1948,7 @@ impl RecipeGraph {
 
     /// Draws the graph for editing, with the Inspector beside it, and makes the changes asked for.
     pub fn show(&mut self, ui: &mut Ui, id_salt: &str) -> Shown {
+        self.text_shown = false;
         let mut changes = Vec::new();
         egui::Panel::right(egui::Id::new(("recipe inspector", id_salt)))
             .resizable(true)
@@ -2177,6 +2213,81 @@ impl RecipeGraph {
         Shown { arranged }
     }
 
+    /// The recipe as text, edited as such: each change that parses is made (and undone with
+    /// the ones typed right before it), one that doesn't shows why. Shown first, it puts the
+    /// cursor on the node in focus.
+    pub fn show_text(&mut self, ui: &mut Ui, id_salt: &str) {
+        if !self.text_shown {
+            self.text_jump = self
+                .focus
+                .and_then(|node| Self::node_doc(&self.doc, node))
+                .map(|item| item.span.start);
+            self.text_buffer = None;
+        }
+        self.text_shown = true;
+        let mut buffer = self
+            .text_buffer
+            .take()
+            .unwrap_or_else(|| self.doc.text.clone());
+        let error = (buffer != self.doc.text)
+            .then(|| parse(&buffer).err())
+            .flatten();
+        egui::Frame::new()
+            .inner_margin(egui::Margin::symmetric(12, 4))
+            .show(ui, |ui| match &error {
+                Some(e) => {
+                    ui.label(RichText::new(format!("⚠ Not applied: {e}")).color(theme::ERROR));
+                }
+                None => {
+                    ui.label(kit::hint(
+                        "Changes are made as you type, whenever the text is a recipe; \
+                         comments stay as written",
+                    ));
+                }
+            });
+        let id = egui::Id::new(("recipe text", id_salt));
+        let output = egui::ScrollArea::both()
+            .auto_shrink(false)
+            .show(ui, |ui| {
+                egui::TextEdit::multiline(&mut buffer)
+                    .id(id)
+                    .code_editor()
+                    .desired_width(f32::INFINITY)
+                    .desired_rows(40)
+                    .show(ui)
+            })
+            .inner;
+        if let Some(at) = self.text_jump.take() {
+            let char = buffer[..at.min(buffer.len())].chars().count();
+            let cursor = egui::text::CCursor::new(char);
+            let mut state = output.state.clone();
+            state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::one(cursor)));
+            state.store(ui.ctx(), id);
+            output.response.request_focus();
+            let rect = output.galley.pos_from_cursor(cursor);
+            ui.scroll_to_rect(
+                rect.translate(output.galley_pos.to_vec2()),
+                Some(egui::Align::Center),
+            );
+        }
+        if buffer != self.doc.text && parse(&buffer).is_ok() {
+            match self.apply(Change::Text(buffer.clone())) {
+                Ok(()) => self.message = None,
+                Err(e) => self.message = Some(e),
+            }
+        }
+        // Kept while it differs: typed and not a recipe yet.
+        if buffer != self.doc.text {
+            self.text_buffer = Some(buffer);
+        }
+        self.poll_trace();
+        if self.trace_dirty && self.trace_job.is_none() {
+            self.start_trace();
+        }
+    }
+
     /// The node in focus, every value of it and what it made; with nothing in focus, how to edit
     /// and what is wrong.
     fn inspector(&mut self, ui: &mut Ui, changes: &mut Vec<Change>) {
@@ -2225,6 +2336,25 @@ impl RecipeGraph {
                     to_group = Some(*group);
                 }
             });
+        }
+        // The comment above it, where the agent says where its values come from.
+        let (_, note) = doc.note(item);
+        let note_key = (node, "#note".to_string());
+        let buffer = edits
+            .entry(note_key.clone())
+            .or_insert_with(|| note.clone());
+        let response = ui.add(
+            egui::TextEdit::multiline(buffer)
+                .hint_text("A note: where it comes from, what it is")
+                .desired_rows(1)
+                .desired_width(f32::INFINITY),
+        );
+        let typed = buffer.clone();
+        if response.lost_focus() && typed != note {
+            changes.push(Change::Note { node, note: typed });
+        }
+        if !response.has_focus() {
+            edits.remove(&note_key);
         }
         ui.add_space(6.0);
 
@@ -4972,6 +5102,32 @@ Recipe(
         assert!(graph.group_named("GBA tileset 2").is_ok());
         assert!(graph.resolution.missing.is_empty());
         assert!(graph.text().contains("\"tileset_2\""));
+    }
+
+    #[test]
+    fn a_note_is_the_comment_above_a_step_and_typing_is_undone_at_once() {
+        let mut graph = graph();
+        let item = RecipeGraph::node_doc(&graph.doc, RNode::Step(0)).unwrap();
+        assert_eq!(graph.doc.note(item).1, "Tiles and palettes.");
+        graph
+            .edit(&Edit::Note("step 1".into(), "The map.".into()))
+            .unwrap();
+        assert!(
+            graph
+                .text()
+                .contains("        // The map.\n        Fill(name: \"map\"")
+        );
+
+        let before = graph.text().to_string();
+        let typed = before.replace("size: 8", "size: 9");
+        graph.edit(&Edit::Text(typed.clone())).unwrap();
+        graph
+            .edit(&Edit::Text(typed.replace("size: 9", "size: 10")))
+            .unwrap();
+        assert!(graph.text().contains("size: 10"));
+        assert!(graph.edit(&Edit::Text("Recipe(steps: [".into())).is_err());
+        graph.undo();
+        assert_eq!(graph.text(), before);
     }
 
     #[test]

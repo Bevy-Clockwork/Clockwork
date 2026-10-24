@@ -730,6 +730,12 @@ screen's layout (plugins on the left, the selected one on the right):
   the image's columns, labelled by what their step makes. The names they make get one shared
   number (`tiles_2`, `bank_2`, ...) so a block added twice doesn't clash. Once added they are
   plain steps in `recipe.ron`; open the group to change anything else.
+- Recipes written by the agent are easiest to change where they are explained: the Inspector's
+  first field is a step's **note**, the `//` lines right above it (up to a blank line or a
+  section header), edited as text and written back as comments (`Doc::note`, `Doc::with_note`).
+  The **Text** tab edits `recipe.ron` itself: each change that parses is made as it is typed
+  (undone together, like typing in a field; nodes keep their places and groups by key), one that
+  doesn't says why and waits. Opened from the graph, it puts the cursor on the selected node.
 - Both graphs have **Find** (Ctrl+F; matches are outlined and the view moves to each in turn,
   searching a step's whole text in a recipe) and **Fit** (the whole graph), and zoom out far
   enough for recipes of a hundred steps (`editor/src/graph_view.rs`).
@@ -741,9 +747,10 @@ screen's layout (plugins on the left, the selected one on the right):
   remote control has `Screen(Plugins)`, `PluginEditor("name")` and `Graph(…)` for the graph of the
   plugin shown: `Find`, `Fit`, `Undo`, `Redo`, `Save`, `Revert`, and recipe edits by name
   (`Recipe(Value("step 0", "offset", "0x40"))`, `Wire("step 0", "tiles", "step 4", "metatiles")`,
-  `Add("Crop")`, `AddBlock("GBA tileset")`, `Move("step 5", false)`, `Duplicate("output 0")`, `Remove("step 3")`), groups
+  `Add("Crop")`, `AddBlock("GBA tileset")`, `Note("step 3", "From the gfx table")`, `Text("…")`, `Move("step 5", false)`, `Duplicate("output 0")`, `Remove("step 3")`), groups
   (`Group(["step 3", "step 4"], "Tiles")`, `OpenGroup("Tiles")`, `CloseGroup("Tiles")`,
-  `Ungroup("Tiles")`, `GroupAutomatically(false)`, `true` to group by outputs); `Report`
+  `Ungroup("Tiles")`, `GroupAutomatically(false)`, `true` to group by outputs) and
+  `ShowText(true)` for the Text tab; `Report`
   adds the graph's state (steps that ran, wires, missing inputs, error, nodes drawn, groups,
   unsaved).
 
