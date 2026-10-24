@@ -4,7 +4,7 @@
 
 ### Added
 
-- `shoot` on actor states: an enemy fires a projectile (an octorok's rock, an archer's arrow)
+- `shoot` on actor states: an enemy fires a projectile (a thrown rock, an arrow, a fireball)
   a moment into the state, at the player or the way it faces; it hurts the player it touches
   and is drawn with its sprite in Play.
 - `patches` on area `Image` outputs: parts of an area that animate on their own, each frames

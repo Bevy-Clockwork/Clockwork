@@ -327,7 +327,7 @@ fn an_actor_shoots_the_player_from_afar() {
     let map = floor();
     let nodes = vec![placed(
         2,
-        "Octorok",
+        "Turret",
         Vec3::new(6.0, 0.0, 0.0),
         vec![turret()],
     )];

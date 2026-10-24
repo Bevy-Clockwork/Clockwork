@@ -78,7 +78,7 @@ pub struct ActorState {
     /// What happens on entering the state: a sound, a dialog, a flag (any trigger effect).
     #[serde(default)]
     pub enter: Option<Effect>,
-    /// A projectile it fires in this state (an octorok's rock, an archer's arrow).
+    /// A projectile it fires in this state (a thrown rock, an arrow, a fireball).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shoot: Option<Shot>,
     /// Where it goes next: the first transition whose cue holds wins, checked every step.
