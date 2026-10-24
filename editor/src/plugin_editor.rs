@@ -1065,6 +1065,16 @@ pub enum GraphCommand {
     Revert,
     /// Changes the open recipe.
     Recipe(recipe_graph::Edit),
+    /// Puts recipe nodes in a new closed group: `Group(["step 3", "step 4"], "Tiles")`.
+    Group(Vec<String>, String),
+    /// Opens a recipe group by its name.
+    OpenGroup(String),
+    /// Closes a recipe group by its name.
+    CloseGroup(String),
+    /// Takes a recipe group away by its name, keeping what is in it.
+    Ungroup(String),
+    /// Groups the recipe again by its section comments (or, with `true`, by its outputs).
+    GroupAutomatically(bool),
 }
 
 /// Runs a graph command on the plugin shown (it must have been drawn once, to be open).
@@ -1096,7 +1106,13 @@ pub fn script(state: &mut EditorState, command: &GraphCommand) -> Result<(), Str
             GraphCommand::Revert => {
                 state.plugin_editor.graphs.remove(&name);
             }
-            GraphCommand::Recipe(_) | GraphCommand::Inspect(_) => {
+            GraphCommand::Recipe(_)
+            | GraphCommand::Inspect(_)
+            | GraphCommand::Group(..)
+            | GraphCommand::OpenGroup(_)
+            | GraphCommand::CloseGroup(_)
+            | GraphCommand::Ungroup(_)
+            | GraphCommand::GroupAutomatically(_) => {
                 return Err("this plugin is a composition".into());
             }
         }
@@ -1115,6 +1131,14 @@ pub fn script(state: &mut EditorState, command: &GraphCommand) -> Result<(), Str
         GraphCommand::Redo => graph.redo(),
         GraphCommand::Recipe(edit) => graph.edit(edit)?,
         GraphCommand::Inspect(node) => graph.inspect(node)?,
+        GraphCommand::Group(nodes, name) => graph.group_nodes(nodes, name)?,
+        GraphCommand::OpenGroup(name) => graph.set_group_open(graph.group_named(name)?, true),
+        GraphCommand::CloseGroup(name) => graph.set_group_open(graph.group_named(name)?, false),
+        GraphCommand::Ungroup(name) => graph.ungroup(graph.group_named(name)?),
+        GraphCommand::GroupAutomatically(by_outputs) => {
+            graph.ungroup_all();
+            graph.group_automatically(*by_outputs);
+        }
         GraphCommand::Save => {
             let message = save_recipe(state, &plugin)?;
             state.plugin_editor.message = Some(message);
