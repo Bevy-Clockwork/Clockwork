@@ -576,20 +576,42 @@ fn scene_tree(ui: &mut egui::Ui, state: &mut EditorState, extractions: &Extracti
     ui.data_mut(|d| d.insert_temp(filter_id, filter.clone()));
     let filter = filter.to_lowercase();
 
-    egui::ScrollArea::vertical()
-        .auto_shrink(false)
-        .show(ui, |ui| {
+    // The rows shown, then only those in view are drawn: a plugin's scene can hold thousands.
+    let scene = &state.workshop.scene;
+    let depths = scene.depths();
+    let names: std::collections::HashMap<NodeId, &str> = scene
+        .nodes
+        .iter()
+        .map(|n| (n.id, n.name.as_str()))
+        .collect();
+    let rows: Vec<(NodeId, usize)> = scene
+        .in_tree_order()
+        .into_iter()
+        .filter(|id| {
+            filter.is_empty()
+                || names
+                    .get(id)
+                    .is_some_and(|name| name.to_lowercase().contains(&filter))
+        })
+        .map(|id| {
+            let depth = if filter.is_empty() { depths[&id] } else { 0 };
+            (id, depth)
+        })
+        .collect();
+    egui::ScrollArea::vertical().auto_shrink(false).show_rows(
+        ui,
+        TREE_ROW_HEIGHT,
+        rows.len(),
+        |ui, range| {
             ui.spacing_mut().item_spacing.y = 0.0;
-            for id in state.workshop.scene.in_tree_order() {
-                let depth = depth_of(&state.workshop.scene.nodes, id);
-                let Some(node) = state.workshop.scene.get(id) else {
-                    continue;
-                };
-                if !filter.is_empty() && !node.name.to_lowercase().contains(&filter) {
-                    continue;
+            let last = range.end == rows.len();
+            for &(id, depth) in &rows[range] {
+                if let Some(node) = state.workshop.scene.get(id) {
+                    tree_row(ui, state, node, depth, extractions, &mut actions);
                 }
-                let depth = if filter.is_empty() { depth } else { 0 };
-                tree_row(ui, state, node, depth, extractions, &mut actions);
+            }
+            if !last {
+                return;
             }
             if state.workshop.scene.nodes.len() == 1 {
                 ui.add_space(12.0);
@@ -610,7 +632,8 @@ fn scene_tree(ui: &mut egui::Ui, state: &mut EditorState, extractions: &Extracti
             if rest.clicked() {
                 actions.clear = true;
             }
-        });
+        },
+    );
 
     let ws = &mut state.workshop;
     if actions.clear {
@@ -703,15 +726,8 @@ fn node_icon(node: &Node, extractions: &Extractions) -> &'static str {
     }
 }
 
-fn depth_of(nodes: &[Node], id: NodeId) -> usize {
-    let mut depth = 0;
-    let mut current = nodes.iter().find(|n| n.id == id).and_then(|n| n.parent);
-    while let Some(parent) = current {
-        depth += 1;
-        current = nodes.iter().find(|n| n.id == parent).and_then(|n| n.parent);
-    }
-    depth
-}
+/// The height of a row of the scene tree.
+const TREE_ROW_HEIGHT: f32 = 24.0;
 
 fn tree_row(
     ui: &mut egui::Ui,
@@ -725,7 +741,8 @@ fn tree_row(
     let primary = state.workshop.selected_node == Some(node.id);
     let shown = state.workshop.scene.is_shown(node.id);
     let width = ui.available_width();
-    let (rect, response) = ui.allocate_exact_size(vec2(width, 24.0), egui::Sense::click_and_drag());
+    let (rect, response) =
+        ui.allocate_exact_size(vec2(width, TREE_ROW_HEIGHT), egui::Sense::click_and_drag());
     let hovered = response.hovered();
     let painter = ui.painter();
     if selected {

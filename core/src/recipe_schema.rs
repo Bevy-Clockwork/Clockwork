@@ -111,9 +111,12 @@ const KINDS: &[&str] = &[
     "Game",
     "Font",
     "Dialog",
+    "Scene",
 ];
+const DEPTHS: &[&str] = &["Bpp4", "Bpp8"];
 const COUNT: FieldType = Count;
 const KIND: FieldType = Choice(KINDS);
+const TEXT: FieldType = Text;
 const STRUCTURE: FieldType = Structure;
 
 pub const STEPS: &[VariantInfo] = &[
@@ -180,6 +183,11 @@ pub const STEPS: &[VariantInfo] = &[
             f("bank", Name, "The palettes"),
             f("columns", Count, "Metatiles per row of the sheet"),
             f("into", Name, "The image it makes"),
+            d(
+                "depth",
+                Choice(DEPTHS),
+                "Bits per pixel: Bpp4 (16 colors) or Bpp8 (256-color backgrounds)",
+            ),
         ],
     },
     VariantInfo {
@@ -197,6 +205,11 @@ pub const STEPS: &[VariantInfo] = &[
             f("width", Count, "Metatiles per row of the map"),
             f("bank", Name, "The palettes"),
             f("into", Name, "The image it makes"),
+            d(
+                "depth",
+                Choice(DEPTHS),
+                "Bits per pixel: Bpp4 (16 colors) or Bpp8 (256-color backgrounds)",
+            ),
         ],
     },
     VariantInfo {
@@ -388,6 +401,77 @@ pub const STEPS: &[VariantInfo] = &[
             f("into", Name, "The sprite it adds to"),
         ],
     },
+    VariantInfo {
+        name: "Places",
+        about: "Places what a game lists in a table of records (enemies, doors, rooms) into a placement list.",
+        fields: &[
+            f("from", Name, "The buffer of records"),
+            d("at", Offset, "Where the first record starts"),
+            f("stride", Count, "Bytes per record"),
+            d("count", Optional(&COUNT), "How many records"),
+            d(
+                "until",
+                Optional(&STRUCTURE),
+                "The record that ends the list: (field, values)",
+            ),
+            d(
+                "when",
+                Structure,
+                "Only records whose fields hold these values: [(field, values)]",
+            ),
+            f("x", Structure, "The field of the x position, in pixels"),
+            f("y", Structure, "The field of the y position, in pixels"),
+            d(
+                "size",
+                Optional(&STRUCTURE),
+                "Width and height fields: the position is then the top left corner",
+            ),
+            d("origin", Structure, "Pixels added to every position"),
+            d(
+                "item",
+                Optional(&STRUCTURE),
+                "Which output each shows: (by, outputs, other)",
+            ),
+            f("name", Structure, "Each node's name: (text, fields)"),
+            d(
+                "group",
+                Optional(&STRUCTURE),
+                "The group node: (text, fields)",
+            ),
+            d(
+                "door",
+                Optional(&STRUCTURE),
+                "Where walking into it takes the player: (to, radius, fade)",
+            ),
+            d(
+                "code",
+                Optional(&STRUCTURE),
+                "The field MarkPlaces writes; the record's number without it",
+            ),
+            d(
+                "extent",
+                Optional(&STRUCTURE),
+                "How far each reaches, by a field: (by, sizes, other)",
+            ),
+            f("into", Name, "The placement list"),
+        ],
+    },
+    VariantInfo {
+        name: "MarkPlaces",
+        about: "Marks the cells placements cover with their codes, as a grid for a surface map.",
+        fields: &[
+            f("from", Name, "The placement list"),
+            f("width", Count, "Cells per row"),
+            f("height", Count, "Rows"),
+            f("cell_size", Count, "Pixels per cell"),
+            d(
+                "origin",
+                Structure,
+                "Where the grid's top left corner is, in pixels",
+            ),
+            f("into", Name, "The buffer of cells"),
+        ],
+    },
 ];
 
 pub const OUTPUTS: &[VariantInfo] = &[
@@ -413,6 +497,11 @@ pub const OUTPUTS: &[VariantInfo] = &[
             f("cell_size", Count, "How big a cell is, in native units"),
             f("grids", Structure, "The grids of codes and what they mean"),
             d("extensions", Structure, "Surfaces this game adds"),
+            d(
+                "image",
+                Optional(&TEXT),
+                "The image output it covers (else one of the same size)",
+            ),
         ],
     },
     VariantInfo {
@@ -698,6 +787,15 @@ pub const OUTPUTS: &[VariantInfo] = &[
             ),
         ],
     },
+    VariantInfo {
+        name: "Scene",
+        about: "Things placed together from placement lists; the Workshop adds them as a group.",
+        fields: &[
+            f("id", Text, "Its id in the plugin"),
+            f("from", Structure, "The placement lists: [\"name\", …]"),
+            d("pixels_per_meter", Number, "Pixels to a meter (default 16)"),
+        ],
+    },
 ];
 
 pub fn step(name: &str) -> Option<&'static VariantInfo> {
@@ -723,6 +821,9 @@ mod tests {
         }
         for kind in KINDS {
             let _: crate::recipe::Kind = ron::from_str(kind).unwrap();
+        }
+        for depth in DEPTHS {
+            let _: crate::recipe::TileDepth = ron::from_str(depth).unwrap();
         }
     }
 }

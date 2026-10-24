@@ -205,6 +205,80 @@ pub fn fit(image: &RgbaImage, target: u32) -> RgbaImage {
     }
 }
 
+/// A map of a scene, `size` pixels on its longer side: every node showing an image drawn
+/// where it stands (images are `pixels_per_meter` pixels to a meter, centred on their node),
+/// other nodes as dots.
+pub fn scene_map<'a>(
+    scene: &clockwork_core::place::SceneTemplate,
+    image: impl Fn(&str) -> Option<&'a RgbaImage>,
+    pixels_per_meter: f32,
+    size: u32,
+) -> RgbaImage {
+    let ppm = pixels_per_meter.max(f32::EPSILON);
+    // Each node's rectangle in meters: (left, top, width, height).
+    let rects: Vec<(f32, f32, f32, f32, Option<&RgbaImage>)> = scene
+        .nodes
+        .iter()
+        .map(|n| {
+            let shown = n.item.as_deref().and_then(&image);
+            let (w, h) = shown.map_or((0.0, 0.0), |i| {
+                (i.width as f32 / ppm, i.height as f32 / ppm)
+            });
+            (
+                n.position[0] - w / 2.0,
+                n.position[2] - h / 2.0,
+                w,
+                h,
+                shown,
+            )
+        })
+        .collect();
+    if rects.is_empty() {
+        return RgbaImage::new(1, 1);
+    }
+    let left = rects.iter().map(|r| r.0).fold(f32::MAX, f32::min);
+    let top = rects.iter().map(|r| r.1).fold(f32::MAX, f32::min);
+    let right = rects.iter().map(|r| r.0 + r.2).fold(f32::MIN, f32::max);
+    let bottom = rects.iter().map(|r| r.1 + r.3).fold(f32::MIN, f32::max);
+    let extent = (right - left).max(bottom - top).max(f32::EPSILON);
+    let scale = size as f32 / extent;
+    let width = (((right - left) * scale).ceil() as u32).clamp(1, size);
+    let height = (((bottom - top) * scale).ceil() as u32).clamp(1, size);
+    let mut out = RgbaImage::new(width, height);
+    let to_px = |m: f32, from: f32| ((m - from) * scale) as i64;
+    for (x, y, w, h, shown) in rects.iter().filter(|r| r.4.is_some()) {
+        let shown = shown.unwrap();
+        let (x0, y0) = (to_px(*x, left), to_px(*y, top));
+        let (pw, ph) = (((w * scale) as i64).max(1), ((h * scale) as i64).max(1));
+        for py in 0..ph {
+            for px in 0..pw {
+                let sx = (px as u64 * shown.width as u64 / pw as u64) as u32;
+                let sy = (py as u64 * shown.height as u64 / ph as u64) as u32;
+                let color = shown.get(sx.min(shown.width - 1), sy.min(shown.height - 1));
+                let (tx, ty) = (x0 + px, y0 + py);
+                if color[3] != 0
+                    && tx >= 0
+                    && ty >= 0
+                    && (tx as u32) < width
+                    && (ty as u32) < height
+                {
+                    out.set(tx as u32, ty as u32, color);
+                }
+            }
+        }
+    }
+    for (x, y, _, _, _) in rects.iter().filter(|r| r.4.is_none()) {
+        let (tx, ty) = (to_px(*x, left), to_px(*y, top));
+        for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+            let (px, py) = (tx + dx, ty + dy);
+            if px >= 0 && py >= 0 && (px as u32) < width && (py as u32) < height {
+                out.set(px as u32, py as u32, [0xE0, 0xB0, 0x40, 0xFF]);
+            }
+        }
+    }
+    out
+}
+
 type Vec3 = [f32; 3];
 
 /// Frames per row and rows at most in a contact sheet, so huge sprites still give a readable one.

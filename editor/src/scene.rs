@@ -4,7 +4,7 @@
 //! The scene is saved to `<data>/scenes/untitled.ron` whenever it changes, so it survives
 //! restarts. It refers to plugin outputs by name and never contains game data.
 
-use std::path::PathBuf;
+use std::{collections::HashMap, path::PathBuf};
 
 use bevy::math::{EulerRot, Quat, Vec3};
 use bevy::transform::components::Transform;
@@ -349,24 +349,47 @@ impl Scene {
         self.nodes.iter_mut().find(|n| n.id == id)
     }
 
-    /// Direct children, in the order they were added.
-    pub fn children(&self, id: NodeId) -> Vec<NodeId> {
-        self.nodes
-            .iter()
-            .filter(|n| n.parent == Some(id))
-            .map(|n| n.id)
-            .collect()
+    /// Every node's children, in the order they were added: one pass over the nodes, so walks
+    /// of big scenes (a plugin's whole world) don't look every node up again for each node.
+    fn child_map(&self) -> HashMap<NodeId, Vec<NodeId>> {
+        let mut children: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        for node in &self.nodes {
+            if let Some(parent) = node.parent {
+                children.entry(parent).or_default().push(node.id);
+            }
+        }
+        children
     }
 
     /// The node and everything below it.
     pub fn subtree(&self, id: NodeId) -> Vec<NodeId> {
+        let children = self.child_map();
         let mut out = vec![id];
         let mut i = 0;
         while i < out.len() {
-            out.extend(self.children(out[i]));
+            if let Some(kids) = children.get(&out[i]) {
+                out.extend(kids);
+            }
             i += 1;
         }
         out
+    }
+
+    /// How deep each node is below the root (the root is 0).
+    pub fn depths(&self) -> HashMap<NodeId, usize> {
+        let mut depths = HashMap::from([(ROOT, 0)]);
+        let parents: HashMap<NodeId, Option<NodeId>> =
+            self.nodes.iter().map(|n| (n.id, n.parent)).collect();
+        for id in self.in_tree_order() {
+            let depth = parents
+                .get(&id)
+                .copied()
+                .flatten()
+                .and_then(|p| depths.get(&p))
+                .map_or(0, |d| d + 1);
+            depths.insert(id, depth);
+        }
+        depths
     }
 
     /// All nodes, parents before children (root first).
@@ -832,7 +855,10 @@ mod tests {
         assert_ne!(copy, a);
         assert_eq!(scene.get(copy).unwrap().name, "a copy");
         assert_eq!(scene.get(copy).unwrap().position, [2.0, 0.0, 0.0]);
-        let kids = scene.children(copy);
+        let kids: Vec<NodeId> = (scene.nodes.iter())
+            .filter(|n| n.parent == Some(copy))
+            .map(|n| n.id)
+            .collect();
         assert_eq!(kids.len(), 1);
         assert_ne!(kids[0], b);
         assert_eq!(scene.get(kids[0]).unwrap().name, "b");

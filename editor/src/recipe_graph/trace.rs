@@ -253,6 +253,13 @@ pub(super) fn summarize_outputs(
                     ));
                     result.image = Some(shrink(&font.image, THUMB));
                 }
+                Output::Scene { .. } => {
+                    let (_, scene) = extracted.scenes.iter().find(|(i, _)| i == id)?;
+                    let doors = scene.nodes.iter().filter(|n| n.door.is_some()).count();
+                    result
+                        .lines
+                        .push(format!("{} nodes, {doors} doors", scene.nodes.len()));
+                }
                 Output::Sound { .. } => {
                     let (_, pcm) = extracted.sounds.iter().find(|(i, _)| i == id)?;
                     result.lines.push(format!(
@@ -315,6 +322,9 @@ pub(super) fn summarize(ports: &[OwnedPort], made: &Made) -> StepResult {
                     s.animations.len()
                 )
             }),
+            NameKind::Places => made
+                .places(name)
+                .map(|p| format!("{name}: {} placed", p.len())),
         };
         result.lines.extend(line);
     }

@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `Places` recipe step: reads where a game places things (rooms, doors, enemies, objects) from
+  its own tables of records, with filters, an end marker, names and groups made from record
+  fields, the output each shows, door targets and how far each reaches.
+- `MarkPlaces` recipe step: marks the cells placements cover with a code from their record,
+  for surface grids of where things are.
+- `Scene` output: a plugin's placements as a group of Workshop nodes, with `Door` behaviors.
+  Listed under World in the content browser with a map preview; placing it adds the whole
+  group.
+- `depth: Bpp8` on `GbaMetatiles` and `GbaMetatileMap` for 256-color backgrounds.
+- `image` on `Surfaces` outputs: the image a surface map covers.
+
+### Fixed
+
+- A surface map is matched to the image it names, so images of the same size no longer share
+  the first surface map of that size in the Workshop, Play mode and `run_recipe` previews.
+
 ## 0.1.0 — Preview
 
 Initial preview release. These features are available for experimentation; importing a game

@@ -433,6 +433,14 @@ item (plugin + output, referenced by name, never game data). Like Godot's scene 
   edit settles (no mouse button held, no text field focused), so a whole drag or a typed name is
   one step. 100 steps; shortcuts are left to text fields while one has focus.
 
+- **Plugin scenes:** a plugin can provide a `Scene` output: things placed together, read from the
+  game's own tables by `Places` steps (the rooms of a world where its maps put them, each room's
+  enemies, objects and NPCs, its doors with `Door` behaviors to the arrival points the exit
+  records name). Placing one adds a node named after it, holding a group node per room or area
+  and a node per placement. Its positions come from the user's ROM when the recipe runs, like
+  every other output, so the plugin still holds no game data. The content browser lists scenes
+  under World and previews them as a map.
+
 Next: several named scenes / projects, saved dock layouts, snapping, and playing a scene.
 
 ### 7.3 Settings (implemented)
@@ -881,6 +889,7 @@ M1 and M2 need no AI on purpose. They build the foundation the agent stands on.
 | 2026-10-21 | Library games can be linked to a decompilation repository; known decomps are suggested by ROM hash from `knowledge/decomps.ron`. The agent (M3) uses the linked decomp as its main source | §6 |
 | 2026-10-21 | Game-specific knowledge lives in plugin data, never in Clockwork code: recipes use generic steps (`Lookup`), and what a game's codes mean is a code → property table in the plugin (`Surfaces` output) | §4.4, §5.1 |
 | 2026-10-23 | Nothing names a game: collision is read by a data-described `CollisionTriangles` step (replacing SM64-only `N64Collision`), known decomps come from content folders, the roll slot is the `dodge` and the boomerang motion `Return` (old names still load) | §4, §5 |
+| 2026-10-24 | Where a game places things is read from its record tables by a generic `Places` step, never written into a recipe; `MarkPlaces` turns placements into surface cells and a `Scene` output into Workshop nodes. GBA background steps take `depth: Bpp8` for 256-color modes. A `Surfaces` output names the image it covers (`image`), so maps of equal size don't get each other's collision | §5.1, §7.2 |
 
 ## 11. First agent test (2026-10-21)
 

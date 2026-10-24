@@ -15,7 +15,12 @@ use bevy::{
     tasks::{AsyncComputeTaskPool, Task, block_on, poll_once},
     window::PrimaryWindow,
 };
-use clockwork_core::{NativeScale, image::RgbaImage, recipe::Kind, surface::SurfaceMap};
+use clockwork_core::{
+    NativeScale,
+    image::RgbaImage,
+    recipe::{Kind, Output},
+    surface::SurfaceMap,
+};
 use clockwork_recipe::{Extracted, Plugin};
 
 use crate::{
@@ -23,7 +28,7 @@ use crate::{
     scene::{ItemRef, Node, NodeId, ROOT},
     settings::Settings,
     sprites,
-    state::{EditorState, LogLevel},
+    state::{EditorState, LogLevel, PlaceRequest},
     surfaces,
     terrains::SceneTerrains,
 };
@@ -303,12 +308,28 @@ pub fn extraction_system(mut state: ResMut<EditorState>, mut extractions: ResMut
     }
 }
 
-/// The surface map covering an output image exactly, if there is one.
+/// The surface map covering an output image exactly, if there is one: the one that names the
+/// image, else (for maps that name none) one of the same size.
 pub fn surfaces_for<'a>(extracted: &'a Extracted, output: &str) -> Option<&'a SurfaceMap> {
     let (_, image) = extracted.images.iter().find(|(id, _)| id == output)?;
+    let named = |id: &str| {
+        extracted
+            .surface_images
+            .iter()
+            .find(|(surface, _)| surface == id)
+            .map(|(_, image)| image.as_str())
+    };
+    if let Some((_, map)) = extracted
+        .surfaces
+        .iter()
+        .find(|(id, _)| named(id) == Some(output))
+    {
+        return Some(map);
+    }
     extracted
         .surfaces
         .iter()
+        .filter(|(id, _)| named(id).is_none())
         .map(|(_, map)| map)
         .find(|m| m.width * m.cell_size == image.width && m.height * m.cell_size == image.height)
 }
@@ -348,6 +369,7 @@ pub struct SceneView {
 pub fn place_system(
     mut state: ResMut<EditorState>,
     mut view: ResMut<SceneView>,
+    mut extractions: ResMut<Extractions>,
     orbit: Res<OrbitCamera>,
     terrains: Res<SceneTerrains>,
     window: Single<&Window, With<PrimaryWindow>>,
@@ -361,6 +383,28 @@ pub fn place_system(
     // Several items dropped at once are spread out in a row from where they were dropped.
     let requests = std::mem::take(&mut state.workshop.place_requests);
     for (n, request) in requests.into_iter().enumerate() {
+        // A scene output becomes a group of nodes, once its plugin has run.
+        if is_scene(&state, &request.item) {
+            extractions.ensure(&mut state, &request.item.plugin);
+            let template = extractions.get(&request.item.plugin).and_then(|x| {
+                x.scenes
+                    .iter()
+                    .find(|(id, _)| *id == request.item.output)
+                    .map(|(_, t)| t.clone())
+            });
+            match template {
+                Some(template) => {
+                    let id = add_scene(&mut state, &request, &template);
+                    view.frame = Some(id);
+                }
+                // Still running: ask again next frame (a failed run leaves it to the error).
+                None if extractions.is_pending(&request.item.plugin) => {
+                    state.workshop.place_requests.push(request);
+                }
+                None => {}
+            }
+            continue;
+        }
         let ray = request
             .at_cursor
             .then(|| window.cursor_position())
@@ -455,6 +499,62 @@ fn place_entity(
         }];
     }
     state.workshop.select_only(id);
+}
+
+fn is_scene(state: &EditorState, item: &ItemRef) -> bool {
+    state.workshop.plugin_index(&item.plugin).is_some_and(|i| {
+        state.workshop.plugins[i]
+            .recipe
+            .outputs
+            .iter()
+            .any(|o| matches!(o, Output::Scene { id, .. } if *id == item.output))
+    })
+}
+
+/// Adds a plugin's scene under `request.parent`: a node named after it holding a node per
+/// placement, each in its group (made the first time a placement names it). Returns the
+/// scene's node.
+fn add_scene(
+    state: &mut EditorState,
+    request: &PlaceRequest,
+    template: &clockwork_core::place::SceneTemplate,
+) -> NodeId {
+    let plugin = request.item.plugin.clone();
+    let title = request.item.output.replace(['_', '-'], " ");
+    let scene = &mut state.workshop.scene;
+    let root = scene.add(
+        request.parent,
+        format!("{} · {plugin}", capitalize(&title)),
+        None,
+        Vec3::ZERO,
+    );
+    let mut groups: HashMap<String, NodeId> = HashMap::new();
+    for node in &template.nodes {
+        let parent = match &node.group {
+            Some(group) => *groups
+                .entry(group.clone())
+                .or_insert_with(|| scene.add(root, group.clone(), None, Vec3::ZERO)),
+            None => root,
+        };
+        let item = node.item.as_ref().map(|output| ItemRef {
+            plugin: plugin.clone(),
+            output: output.clone(),
+        });
+        let id = scene.add(parent, node.name.clone(), item, Vec3::from(node.position));
+        if let Some(door) = &node.door
+            && let Some(added) = scene.get_mut(id)
+        {
+            added.behaviors = vec![clockwork_core::behavior::NodeBehavior::new(
+                clockwork_core::behavior::Behavior::Door {
+                    radius: door.radius,
+                    to: door.to.clone(),
+                    fade: door.fade,
+                },
+            )];
+        }
+    }
+    state.workshop.select_only(root);
+    root
 }
 
 /// Whether an item belongs on the ground of a world (characters, objects, abilities) rather
@@ -692,12 +792,15 @@ pub fn scene_system(
         }
     } else {
         // Same structure: copy transforms and visibility (the adjust panel edits them live).
+        let by_id: HashMap<NodeId, &Node> = (state.workshop.scene.nodes.iter())
+            .map(|n| (n.id, n))
+            .collect();
         for (node, mut transform, mut vis) in &mut transforms {
             // Play mode moves the played node itself.
             if state.workshop.playing == Some(node.0) {
                 continue;
             }
-            if let Some(n) = state.workshop.scene.get(node.0) {
+            if let Some(n) = by_id.get(&node.0) {
                 *transform = n.local_transform();
                 *vis = if state.workshop.hidden_in_play.contains(&node.0) {
                     Visibility::Hidden
@@ -1040,5 +1143,110 @@ mod tests {
         extractions.invalidate(4, &plugins);
         assert!(extractions.get("b").is_none());
         assert!(extractions.get("c").is_some());
+    }
+
+    #[test]
+    fn surfaces_go_with_the_image_they_name() {
+        let map = |cells: u8| {
+            let meaning = clockwork_core::surface::CodeMeaning {
+                codes: [(cells as u16, vec![clockwork_core::SurfaceProperty::Solid])].into(),
+                other: None,
+            };
+            SurfaceMap::build(1, 16, &[("g", &[cells as u16], &meaning)], vec![]).unwrap()
+        };
+        let image = || RgbaImage::new(16, 16);
+        let extracted = Extracted {
+            images: vec![("a".into(), image()), ("b".into(), image())],
+            surfaces: vec![("a_s".into(), map(1)), ("b_s".into(), map(2))],
+            surface_images: vec![("a_s".into(), "a".into()), ("b_s".into(), "b".into())],
+            ..Default::default()
+        };
+        // Both maps fit both images; each goes with the one it names.
+        assert_eq!(
+            surfaces_for(&extracted, "b"),
+            Some(&extracted.surfaces[1].1)
+        );
+        assert_eq!(
+            surfaces_for(&extracted, "a"),
+            Some(&extracted.surfaces[0].1)
+        );
+    }
+
+    #[test]
+    fn a_plugin_scene_becomes_a_group_of_nodes() {
+        use clockwork_core::place::{Door, SceneNode, SceneTemplate};
+        let mut state = EditorState {
+            library: clockwork_library::Library::new(),
+            missing: Vec::new(),
+            imports: Default::default(),
+            selected: None,
+            search: String::new(),
+            agent_prompt: String::new(),
+            screen: Default::default(),
+            log: Vec::new(),
+            fetch_box_art: false,
+            names: Default::default(),
+            decomps: Default::default(),
+            notes: Default::default(),
+            decomp_input: String::new(),
+            boxart_retry: Vec::new(),
+            boxart_busy: false,
+            workshop: Default::default(),
+            agents: Vec::new(),
+            claude_connected: false,
+            player: None,
+            plugin_editor: Default::default(),
+            quit_asked: false,
+            palette_request: None,
+        };
+        let node =
+            |name: &str, group: Option<&str>, item: Option<&str>, door: Option<&str>| SceneNode {
+                name: name.into(),
+                group: group.map(Into::into),
+                item: item.map(Into::into),
+                position: [1.0, 0.0, 2.0],
+                door: door.map(|to| Door {
+                    to: to.into(),
+                    radius: 0.5,
+                    fade: 0.6,
+                }),
+            };
+        let template = SceneTemplate {
+            nodes: vec![
+                node("Room", None, Some("room"), None),
+                node("Slime", Some("Woods"), Some("slime"), None),
+                node("Door", Some("Woods"), None, Some("arrive")),
+            ],
+        };
+        let request = PlaceRequest {
+            item: ItemRef {
+                plugin: "p".into(),
+                output: "world".into(),
+            },
+            parent: ROOT,
+            at_cursor: false,
+        };
+        let root = add_scene(&mut state, &request, &template);
+        let scene = &state.workshop.scene;
+        let children = |id| {
+            scene
+                .nodes
+                .iter()
+                .filter(move |n| n.parent == Some(id))
+                .map(|n| n.name.as_str())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(scene.get(root).unwrap().name, "World · p");
+        assert_eq!(children(root), ["Room", "Woods"]);
+        let woods = scene.nodes.iter().find(|n| n.name == "Woods").unwrap().id;
+        assert_eq!(children(woods), ["Slime", "Door"]);
+        let slime = scene.nodes.iter().find(|n| n.name == "Slime").unwrap();
+        assert_eq!(slime.item.as_ref().unwrap().output, "slime");
+        assert_eq!(slime.position, [1.0, 0.0, 2.0]);
+        let door = scene.nodes.iter().find(|n| n.name == "Door").unwrap();
+        assert!(matches!(
+            &door.behaviors[0].behavior,
+            clockwork_core::behavior::Behavior::Door { to, .. } if to == "arrive"
+        ));
     }
 }
