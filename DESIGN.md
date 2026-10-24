@@ -712,6 +712,9 @@ screen's layout (plugins on the left, the selected one on the right):
   other plugins.
 - **Plugins from your games** have two tabs. **Recipe** (`editor/src/recipe_graph.rs`) draws the
   recipe as a node graph: a node per step and per output, wired by the names steps make and use.
+  The file holds the graph's state and its changes; beside it in `recipe_graph/` are the model
+  (nodes, ports and wires), the run (`trace`), the add templates, the controls inside nodes
+  (`widgets`) and how egui-snarl draws it all (`viewer`).
   Every step and output lists those names with how it uses them (`Step::ports`, `Output::ports`
   in `core`: read, write, update, or grow, which makes the name if no earlier step did), so
   wires follow the recipe's order; an input nothing earlier makes shows red. Each node edits its
