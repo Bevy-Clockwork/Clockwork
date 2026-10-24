@@ -7,6 +7,8 @@
 - `recipe_file` on the agent's `run_recipe`, `save_plugin` and `play_test` tools: a recipe
   read from a file instead of sent in place, for recipes too large to send (a whole game world
   generated from its tables).
+- `params` on the `Text` recipe step: control codes followed by parameter bytes, which are
+  skipped, so colour, sound and variable codes no longer decode as letters or end the text.
 - Scripts: the effect `Run` starts commands that run over time (`Do`, `Wait`, `Until`, `Walk`,
   `Place`, `Hold`, `If`, `Repeat`, `End`), for cutscenes and events. A script can hold the
   player still, and nodes it walks take their behaviors along. The Inspector edits scripts, and

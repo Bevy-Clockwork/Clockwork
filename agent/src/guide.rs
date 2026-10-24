@@ -94,7 +94,10 @@ N64Texture(from: "seg02", at: 0x5800, format: Rgba16, width: 16, height: 16, int
 Text(from: "seg02", at: 0x10F68, runs: [(0x00, "0123456789ABCDEF")], codes: {0xFE: "\n", 0x9E: " "}, end: 0xFF, into: "sign")
     Decodes text through the game's character map into a buffer (UTF-8): `runs` give bytes in
     a row a character each, `codes` single bytes any text; a byte neither names is an error
-    unless `other: Some("?")`. Dialog outputs show it (`from`).
+    unless `other: Some("?")`. Dialog outputs show it (`from`). Control codes with parameters
+    (a colour, a sound, a name to insert) go in `params: {0x02: 1, 0x03: 2}`: that many bytes
+    after the code are skipped, so a parameter never decodes as a letter or ends the text;
+    `codes` can still give the code itself a meaning.
 MergeSprite(from: "sheet2", into: "hero")
     Appends sprite sheet2's frames and animations to sprite hero (animation names must be
     unique). Games draw one character from several sheets of frames (a dodge drawn in another
