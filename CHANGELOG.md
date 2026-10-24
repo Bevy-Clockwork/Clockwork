@@ -4,6 +4,9 @@
 
 ### Added
 
+- `shoot` on actor states: an enemy fires a projectile (a thrown rock, an arrow, a fireball)
+  a moment into the state, at the player or the way it faces; it hurts the player it touches
+  and is drawn with its sprite in Play.
 - `patches` on area `Image` outputs: parts of an area that animate on their own, each frames
   the size of that part drawn at its place over the area with its own timing, so a big map
   with some water doesn't need a whole copy of the map per frame.

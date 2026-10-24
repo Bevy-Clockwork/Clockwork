@@ -15,10 +15,11 @@ use bevy::{
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
 };
 use clockwork_core::{
-    action::AttachmentFrames,
+    action::{AttachmentFrames, ProjectileSprite},
     character2d::{AnimationRef, Direction4},
     sprite::Sprite,
 };
+use clockwork_runtime::projectiles::Live;
 
 use crate::{
     play::PlaySession,
@@ -385,50 +386,61 @@ pub fn projectile_system(
         &mut Visibility,
     )>,
 ) {
-    let fighter = session.fighter();
     let upright = session.in_3d().then_some(orbit.yaw);
-    let mut shown: Vec<(BuiltFrame, bool, bool, Vec3)> = Vec::new();
-    if let Some(fighter) = fighter
+    // The character's projectiles and the actors' shots, each with its look and plugin.
+    let mut flying: Vec<(&str, &ProjectileSprite, &Live)> = Vec::new();
+    if let Some(fighter) = session.fighter()
         && let Some(plugin) = fighter.plugin.as_deref()
     {
         for p in fighter.projectiles.iter() {
-            let Some(look) = fighter.look_of(&p.id) else {
-                continue;
-            };
-            let Some(source) = extractions
-                .get(plugin)
-                .and_then(|x| x.sprite(&look.sprite))
-                .map(|s| &s.sprite)
-            else {
-                continue;
-            };
-            let dir = p.dir();
-            // North is up the map (-z).
-            let facing = Direction4::from_input(dir.x, -dir.y, Direction4::South);
-            let picked = match (&look.burst, p.is_bursting()) {
-                (Some(burst), true) => frame_of(
-                    source,
-                    &AnimationRef {
-                        name: burst.clone(),
-                        flip_x: false,
-                        flip_y: false,
-                    },
-                    p.age,
-                ),
-                _ => frame_of(source, look.animation.get(facing), p.age),
-            };
-            let Some((frame, fx, fy)) = picked else {
-                continue;
-            };
-            let Some(built) = cache
-                .get(&extractions, plugin, &look.sprite, &mut images)
-                .and_then(|b| b.frames.get(frame).cloned())
-            else {
-                continue;
-            };
-            let at = Vec3::new(p.position.x, p.height + look.height, p.position.y);
-            shown.push((built, fx, fy, at));
+            if let Some(look) = fighter.look_of(&p.id) {
+                flying.push((plugin, look, p));
+            }
         }
+    }
+    let entities = session.entities();
+    for p in entities.shots.iter() {
+        if let Some((spec, Some(plugin))) = entities.shot(&p.id)
+            && let Some(look) = &spec.sprite
+        {
+            flying.push((plugin, look, p));
+        }
+    }
+    let mut shown: Vec<(BuiltFrame, bool, bool, Vec3)> = Vec::new();
+    for (plugin, look, p) in flying {
+        let Some(source) = extractions
+            .get(plugin)
+            .and_then(|x| x.sprite(&look.sprite))
+            .map(|s| &s.sprite)
+        else {
+            continue;
+        };
+        let dir = p.dir();
+        // North is up the map (-z).
+        let facing = Direction4::from_input(dir.x, -dir.y, Direction4::South);
+        let picked = match (&look.burst, p.is_bursting()) {
+            (Some(burst), true) => frame_of(
+                source,
+                &AnimationRef {
+                    name: burst.clone(),
+                    flip_x: false,
+                    flip_y: false,
+                },
+                p.age,
+            ),
+            _ => frame_of(source, look.animation.get(facing), p.age),
+        };
+        let Some((frame, fx, fy)) = picked else {
+            continue;
+        };
+        let Some(built) = cache
+            .get(&extractions, plugin, &look.sprite, &mut images)
+            .and_then(|b| b.frames.get(frame).cloned())
+        else {
+            continue;
+        };
+        let at = Vec3::new(p.position.x, p.height + look.height, p.position.y);
+        shown.push((built, fx, fy, at));
     }
 
     let mut existing: Vec<_> = quads.iter_mut().collect();

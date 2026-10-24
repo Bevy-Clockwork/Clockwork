@@ -490,9 +490,10 @@ impl Play {
             };
             self.avatar.step(&mut self.fighter, &world, controls);
             // Actors move in the level: they don't block each other.
+            let radius = self.avatar.radius();
             let inventory = self.fighter.inventory.as_ref();
             self.entities
-                .act(STEP, self.avatar.position(), level, &|item| {
+                .act(STEP, (self.avatar.position(), radius), level, &|item| {
                     inventory.map_or(0, |i| i.count(item))
                 });
         }

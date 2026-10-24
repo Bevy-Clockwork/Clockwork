@@ -303,6 +303,56 @@ fn an_actor_chases_the_player_and_hurts_on_contact() {
     assert!(pose.at.x < 5.0, "it came to the player: {}", pose.at);
 }
 
+/// A turret that fires a rock at the player every second and never moves.
+fn turret() -> Behavior {
+    Behavior::Actor(Box::new(
+        ron::from_str(
+            r#"(
+                radius: 0.4,
+                states: [
+                    (name: "aim", shoot: Some((at: 0.1, ahead: 0.5,
+                        projectile: (id: "rock", motion: Straight(speed: 8.0), lifetime: 2.0,
+                                     radius: 0.2, damage: 2.0))),
+                     next: [(to: "reload", when: After(0.2))]),
+                    (name: "reload", next: [(to: "aim", when: After(0.8))]),
+                ],
+            )"#,
+        )
+        .unwrap(),
+    ))
+}
+
+#[test]
+fn an_actor_shoots_the_player_from_afar() {
+    let map = floor();
+    let nodes = vec![placed(
+        2,
+        "Turret",
+        Vec3::new(6.0, 0.0, 0.0),
+        vec![turret()],
+    )];
+    let mut play = play(nodes, Rules::default());
+    // The rock leaves at 0.1 s and flies the 6 m at 8 m/s: the player is hurt once by it.
+    let happened = walk(&mut play, &map, &nowhere, Vec2::ZERO, 0.9);
+    assert_eq!(
+        happened.iter().filter(|h| **h == Happened::Hurt).count(),
+        1,
+        "{happened:?}"
+    );
+    assert_eq!(play.vitals.health, play.vitals.max - 2.0);
+    assert_eq!(
+        play.entities.shots.count("rock"),
+        0,
+        "it stopped at the player"
+    );
+    assert_eq!(play.entities.live[0].at, Vec3::new(6.0, 0.0, 0.0));
+    let (rock, plugin) = play.entities.shot("rock").unwrap();
+    assert_eq!((rock.damage, plugin), (2.0, None));
+    // It fires again each time it aims.
+    walk(&mut play, &map, &nowhere, Vec2::ZERO, 0.5);
+    assert_eq!(play.entities.shots.count("rock"), 1);
+}
+
 #[test]
 fn beating_every_actor_wins_a_destroy_all_game() {
     let map = floor();
