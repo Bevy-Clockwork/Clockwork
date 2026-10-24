@@ -723,7 +723,9 @@ screen's layout (plugins on the left, the selected one on the right):
   it; Delete removes the selected nodes. Buffers show their first bytes in hex, sprites their
   first frame, and outputs what the whole recipe made of them (or the error of the output that
   failed). After a change the recipe runs again in the background (nodes show the last run
-  until it is done). Undo/Redo (and Ctrl+Z/Ctrl+Y) cover every change.
+  until it is done), and only from the change on: a run keeps what the steps had made every 16
+  steps (`clockwork_recipe::run_from` goes on from such a point, up to 256 MB of them), so an
+  edit to step 150 of 180 runs about 40 steps, not 180. Undo/Redo (and Ctrl+Z/Ctrl+Y) cover every change.
   The graph is a view over `recipe.ron` as text (`clockwork_recipe::text`: where every value sits
   in RON): each change replaces a span and is parsed again before it is kept, so the agent's
   comments survive and nothing the format can't hold is written. **Save** writes `recipe.ron` and

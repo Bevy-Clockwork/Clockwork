@@ -203,6 +203,42 @@ struct Trace {
     error_step: Option<usize>,
     /// The output the error is in.
     error_output: Option<usize>,
+    /// What the run kept to go on from, so the next run after a change starts near it.
+    kept: Kept,
+}
+
+/// What the steps of a run had made at points along the way, for the next run to go on from:
+/// a change to step 150 of 180 runs only the steps from the last point before it.
+#[derive(Clone, Default)]
+struct Kept {
+    /// The steps that ran, and the ROM they ran on.
+    steps: Vec<Step>,
+    rom: Option<Arc<Vec<u8>>>,
+    /// After how many steps, and what they had made by then.
+    marks: Vec<(usize, Arc<Made>)>,
+}
+
+/// Steps between two points a run keeps.
+const KEEP_EVERY: usize = 16;
+/// The most memory a run's kept points may take, in bytes.
+const KEEP_BUDGET: usize = 256 * 1024 * 1024;
+
+impl Kept {
+    /// Where a run of `steps` on `rom` can go on from: the steps that need not run again, and
+    /// what they made (`None` to run all of them).
+    fn start(&self, steps: &[Step], rom: &Arc<Vec<u8>>) -> Option<(usize, &Arc<Made>)> {
+        if !self.rom.as_ref().is_some_and(|r| Arc::ptr_eq(r, rom)) {
+            return None;
+        }
+        let same = (self.steps.iter())
+            .zip(steps)
+            .take_while(|(a, b)| a == b)
+            .count();
+        (self.marks.iter())
+            .rev()
+            .find(|(n, _)| *n <= same)
+            .map(|(n, made)| (*n, made))
+    }
 }
 
 /// Bytes kept of a buffer, to show.
@@ -1332,10 +1368,11 @@ impl RecipeGraph {
         self.trace_job = None;
         self.trace = trace(
             &self.recipe,
-            self.rom.as_deref().map(Vec::as_slice),
+            self.rom.as_ref(),
             &self.assets,
             &self.plugin,
             &self.ports,
+            &self.trace,
         );
         self.revision += 1;
     }
@@ -1350,17 +1387,16 @@ impl RecipeGraph {
         let assets = self.assets.clone();
         let plugin = self.plugin.clone();
         let ports = self.ports.clone();
+        // Only what the next run can go on from: the steps it need not run again, and what
+        // they showed.
+        let last = Trace {
+            steps: self.trace.steps.clone(),
+            kept: self.trace.kept.clone(),
+            ..Trace::default()
+        };
         let started = std::thread::Builder::new()
             .name("recipe trace".into())
-            .spawn(move || {
-                trace(
-                    &recipe,
-                    rom.as_deref().map(Vec::as_slice),
-                    &assets,
-                    &plugin,
-                    &ports,
-                )
-            });
+            .spawn(move || trace(&recipe, rom.as_ref(), &assets, &plugin, &ports, &last));
         match started {
             Ok(job) => self.trace_job = Some((self.trace_runs, job)),
             Err(_) => self.run_trace(),
@@ -3520,13 +3556,15 @@ impl RecipeGraph {
     }
 }
 
-/// Runs a recipe on the ROM and keeps what every step made.
+/// Runs a recipe on the ROM and keeps what every step made, going on from the `last` run
+/// where the steps before a change are the same.
 fn trace(
     recipe: &Recipe,
-    rom: Option<&[u8]>,
+    rom: Option<&Arc<Vec<u8>>>,
     assets: &clockwork_recipe::assets::OwnedAssets,
     plugin: &str,
     ports: &HashMap<RNode, Vec<OwnedPort>>,
+    last: &Trace,
 ) -> Trace {
     let Some(rom) = rom else {
         return Trace {
@@ -3535,9 +3573,35 @@ fn trace(
         };
     };
     let mut steps = vec![None; recipe.steps.len()];
+    let mut kept = Kept {
+        steps: recipe.steps.clone(),
+        rom: Some(rom.clone()),
+        marks: Vec::new(),
+    };
+    let (from, made) = match last.kept.start(&recipe.steps, rom) {
+        // What the steps before showed is still right, as long as all of them did.
+        Some((n, made)) if last.steps.len() >= n && last.steps[..n].iter().all(Option::is_some) => {
+            steps[..n].clone_from_slice(&last.steps[..n]);
+            kept.marks = (last.kept.marks.iter())
+                .filter(|(m, _)| *m <= n)
+                .cloned()
+                .collect();
+            (n, Made::clone(made))
+        }
+        _ => (0, Made::default()),
+    };
+    let mut budget: usize = kept.marks.iter().map(|(_, m)| m.bytes()).sum();
     let assets = assets.with_recipe(plugin, recipe);
-    let result = clockwork_recipe::run_observed(recipe, rom, &assets, |i, made| {
+    let result = clockwork_recipe::run_from(recipe, rom, &assets, made, from, |i, made| {
         steps[i] = Some(summarize(&ports[&RNode::Step(i)], made));
+        let n = i + 1;
+        if n % KEEP_EVERY == 0 && n < recipe.steps.len() {
+            let bytes = made.bytes();
+            if budget + bytes <= KEEP_BUDGET {
+                budget += bytes;
+                kept.marks.push((n, Arc::new(made.clone())));
+            }
+        }
     });
     let (outputs, error, error_step, error_output) = match result {
         Ok(extracted) => (summarize_outputs(recipe, &extracted), None, None, None),
@@ -3562,6 +3626,7 @@ fn trace(
         error,
         error_step,
         error_output,
+        kept,
     }
 }
 
@@ -5064,6 +5129,30 @@ Recipe(
 
     fn graph() -> RecipeGraph {
         RecipeGraph::new(RECIPE.into(), &RecipeLayout::default(), None).unwrap()
+    }
+
+    #[test]
+    fn a_change_runs_from_the_last_point_kept_before_it() {
+        let steps: Vec<String> = (0..40)
+            .map(|i| format!("Fill(name: \"b{i}\", size: {}),", i + 1))
+            .collect();
+        let text = format!("(steps: [{}], outputs: [])", steps.join("\n"));
+        let rom = Some(Arc::new(vec![0; 16]));
+        let mut graph = RecipeGraph::new(text.clone(), &RecipeLayout::default(), rom).unwrap();
+        graph.run_trace();
+        let marks: Vec<usize> = graph.trace.kept.marks.iter().map(|(n, _)| *n).collect();
+        assert_eq!(marks, [16, 32]);
+        let first = graph.trace.kept.marks[0].1.clone();
+
+        // Step 20 changes: what was kept after 16 steps is gone on from, not made again.
+        graph.recipe.steps[20] = ron::from_str("Fill(name: \"b20\", size: 99)").unwrap();
+        graph.run_trace();
+        assert!(Arc::ptr_eq(&graph.trace.kept.marks[0].1, &first));
+        let lines = |g: &RecipeGraph, i: usize| g.trace.steps[i].as_ref().unwrap().lines.clone();
+        assert_eq!(lines(&graph, 20), ["b20: 99 bytes"]);
+        assert_eq!(lines(&graph, 3), ["b3: 4 bytes"]);
+        assert_eq!(lines(&graph, 39), ["b39: 40 bytes"]);
+        assert_eq!(graph.trace.kept.marks.len(), 2);
     }
 
     fn has_wire(graph: &RecipeGraph, from: RNode, to: RNode) -> bool {

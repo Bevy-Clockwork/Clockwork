@@ -14,7 +14,7 @@ use crate::RecipeError;
 /// The most keyframes read for one animation; a list without an end marker stops here.
 const MAX_KEYFRAMES: usize = 4096;
 
-type Buffers<'a> = HashMap<&'a str, Vec<u8>>;
+type Buffers = HashMap<String, Vec<u8>>;
 
 fn buffer<'b>(step: usize, buffers: &'b Buffers, name: &str) -> Result<&'b [u8], RecipeError> {
     buffers
@@ -49,7 +49,7 @@ fn table_values(step: usize, buffers: &Buffers, table: &Table) -> Result<Vec<i64
 pub(crate) fn object_frames(
     step: usize,
     buffers: &Buffers,
-    banks: &HashMap<&str, PaletteBank>,
+    banks: &HashMap<String, PaletteBank>,
     tiles: &str,
     bank: &str,
     objects: &str,
@@ -319,14 +319,14 @@ mod tests {
         use clockwork_core::recipe::{FrameTables, ObjectLayout};
         // One red tile; one frame whose list (count 1) holds a single 8×8 OAM object at (2, 3).
         let mut buffers: Buffers = HashMap::new();
-        buffers.insert("tiles", vec![0x11; 32]);
+        buffers.insert("tiles".into(), vec![0x11; 32]);
         // attr0: y = 3, shape 0. attr1: x = 2, size 0. attr2: tile 0, palette 0.
-        buffers.insert("objects", vec![1, 3, 0, 2, 0, 0, 0]);
-        buffers.insert("lists", vec![0, 0, 0, 0]);
+        buffers.insert("objects".into(), vec![1, 3, 0, 2, 0, 0, 0]);
+        buffers.insert("lists".into(), vec![0, 0, 0, 0]);
         let mut banks = HashMap::new();
         let mut bank = PaletteBank::default();
         bank.load(&[0, 0, 0x1F, 0], 0);
-        banks.insert("obj", bank);
+        banks.insert("obj".to_string(), bank);
         let frames = FrameTables {
             lists: Table {
                 buffer: "lists".into(),
