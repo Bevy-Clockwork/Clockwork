@@ -386,8 +386,11 @@ Godot's FileSystem dock and Blender's Asset Browser (non-modal, non-blocking, se
 - **Selection:** a click selects an item for the Inspector, Ctrl+click adds one (or takes it
   out), and dragging a selected item into the viewport places every selected placeable item,
   side by side. The remote control's `BrowserView(list, "search")` sets the view.
-- **Appear by themselves:** plugin folders are checked every 2 s (file names and modification
-  times); new, changed or removed plugins update the browser without Rescan. The selected and
+- **Appear by themselves:** plugin folders are watched (`notify`: the system reports changes to
+  a plugin's `clockwork.toml`, `recipe.ron` or `compose.ron`, or a plugin folder added or
+  removed, and they are read once things are quiet for 0.3 s; where folders can't be watched
+  they are checked every 2 s by file names and modification times); new, changed or removed
+  plugins update the browser without Rescan. The selected and
   loaded plugin are kept across rescans. Only plugins that changed, and those using them, are
   extracted again.
 - **Previews** are drawn in the background from the Workshop's extraction, one plugin at a

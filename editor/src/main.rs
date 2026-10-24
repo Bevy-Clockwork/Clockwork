@@ -38,6 +38,7 @@ mod terrains;
 mod theme;
 mod title_logo;
 mod ui;
+mod watch;
 mod workshop;
 mod workshop_ui;
 
