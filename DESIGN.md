@@ -762,7 +762,13 @@ screen's layout (plugins on the left, the selected one on the right):
   doesn't says why and waits. Opened from the graph, it puts the cursor on the selected node.
 - Both graphs have **Find** (Ctrl+F; matches are outlined and the view moves to each in turn,
   searching a step's whole text in a recipe) and **Fit** (the whole graph), and zoom out far
-  enough for recipes of a hundred steps (`editor/src/graph_view.rs`).
+  enough for recipes of a hundred steps (`editor/src/graph_view.rs`). While part of a graph is
+  out of view, a **minimap** in its bottom right corner shows every node and the part in view;
+  a click or a drag there moves the view.
+- **Run order:** the toolbar's **1→2** (or *Show the order on the graph* in the Inspector)
+  draws a numbered, dashed path from each step to the next, through the closed groups that hold
+  them (`editor/src/recipe_graph/order.rs`). With nothing selected the Inspector lists the steps
+  in the order they run; dragging one by its handle onto another makes it run there.
 - **Changes are kept per plugin** while others are shown; a plugin with changes that aren't
   saved has a ● in the list (and the Plugins tab one too), and quitting (the window or
   File → Quit) asks first. A plugin file changed on disk (the agent) is loaded again while there
@@ -774,7 +780,7 @@ screen's layout (plugins on the left, the selected one on the right):
   `Add("Crop")`, `AddBlock("GBA tileset")`, `Note("step 3", "From the gfx table")`, `Text("…")`, `Move("step 5", false)`, `Duplicate("output 0")`, `Remove("step 3")`), groups
   (`Group(["step 3", "step 4"], "Tiles")`, `OpenGroup("Tiles")`, `CloseGroup("Tiles")`,
   `Ungroup("Tiles")`, `GroupAutomatically(false)`, `true` to group by outputs) and
-  `ShowText(true)` for the Text tab; `Report`
+  `ShowText(true)` for the Text tab, `ShowOrder(true)` for the run order; `Report`
   adds the graph's state (steps that ran, wires, missing inputs, error, nodes drawn, groups,
   unsaved).
 

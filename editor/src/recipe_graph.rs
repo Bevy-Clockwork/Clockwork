@@ -45,6 +45,7 @@ use crate::{
 
 mod blocks;
 mod groups;
+mod order;
 
 use groups::{GNode, GroupId, GroupInfo, SavedGroup};
 
@@ -797,6 +798,8 @@ pub struct RecipeGraph {
     arrange_pending: bool,
     /// Finding nodes and moving the view.
     pub nav: Navigator,
+    /// Whether the order steps run in is drawn over the graph.
+    pub show_order: bool,
     /// Every plugin's assets, where the recipe's characters find the parts they name.
     pub assets: Arc<clockwork_recipe::assets::OwnedAssets>,
     /// The plugin's name, for the parts it names of itself.
@@ -921,6 +924,7 @@ impl RecipeGraph {
             sizes: HashMap::new(),
             arrange_pending: !complete,
             nav: Navigator::default(),
+            show_order: false,
             focus: None,
             focus_group: None,
             text_buffer: None,
@@ -2010,6 +2014,7 @@ impl RecipeGraph {
             nodes: &self.nodes,
             edits: &mut self.edits,
             last_sizes: &self.sizes,
+            show_order: self.show_order,
             changes: Vec::new(),
             group_changes: Vec::new(),
             sizes: HashMap::new(),
@@ -2023,6 +2028,12 @@ impl RecipeGraph {
         changes.extend(std::mem::take(&mut viewer.changes));
         let mut group_changes = std::mem::take(&mut viewer.group_changes);
         let sizes = std::mem::take(&mut viewer.sizes);
+        self.nav
+            .minimap(ui, id_salt, &self.snarl, &self.sizes, |node| match node {
+                GNode::Item(RNode::Step(_)) => theme::PARCHMENT_DIM,
+                GNode::Item(RNode::Output(_)) => theme::SUCCESS,
+                GNode::Group(_) => theme::BRASS,
+            });
 
         // Open groups have their name and a button to close them above their frame.
         for (g, _, rect) in frames {
@@ -2294,7 +2305,7 @@ impl RecipeGraph {
         let Some(node) = self.focus else {
             match self.focus_group.filter(|g| self.groups.contains_key(g)) {
                 Some(group) => self.group_inspector(ui, group),
-                None => self.overview(ui),
+                None => self.overview(ui, changes),
             }
             return;
         };
@@ -2740,7 +2751,7 @@ impl RecipeGraph {
     }
 
     /// The Inspector with nothing selected: how to edit, then what is wrong.
-    fn overview(&mut self, ui: &mut Ui) {
+    fn overview(&mut self, ui: &mut Ui, changes: &mut Vec<Change>) {
         ui.label(
             RichText::new("Nothing selected")
                 .font(theme::display(18.0))
@@ -2824,6 +2835,8 @@ impl RecipeGraph {
             self.frame_group(g);
         }
 
+        self.run_order(ui, changes);
+
         let problems = self.problems();
         kit::section(ui, &format!("Problems · {}", problems.len()));
         if problems.is_empty() {
@@ -2842,6 +2855,61 @@ impl RecipeGraph {
                     ui.label(text);
                 }
             }
+        }
+        if let Some(node) = go {
+            self.go_to(node);
+        }
+    }
+
+    /// The steps in the order they run, each dragged by its handle to run elsewhere (dropped
+    /// on a step, it takes that step's place). A click goes to it.
+    fn run_order(&mut self, ui: &mut Ui, changes: &mut Vec<Change>) {
+        let steps = self.recipe.steps.len();
+        kit::section(ui, &format!("Run order · {steps}"));
+        ui.checkbox(&mut self.show_order, "Show the order on the graph")
+            .on_hover_text("A numbered path from each step to the next");
+        ui.label(kit::dim("Drag a step by ⠿ to make it run elsewhere."));
+        let mut go = None;
+        let mut moved = None;
+        let row_h = 22.0;
+        egui::ScrollArea::vertical()
+            .id_salt("run order")
+            .max_height(260.0)
+            .show_rows(ui, row_h, steps, |ui, rows| {
+                for i in rows {
+                    let node = RNode::Step(i);
+                    let row = ui
+                        .horizontal(|ui| {
+                            ui.set_min_height(row_h - 2.0);
+                            ui.dnd_drag_source(egui::Id::new(("run order", i)), i, |ui| {
+                                ui.label(RichText::new("⠿").color(theme::FAINT));
+                            })
+                            .response
+                            .on_hover_cursor(egui::CursorIcon::Grab);
+                            if ui.link(title(&self.doc, node)).clicked() {
+                                go = Some(node);
+                            }
+                        })
+                        .response;
+                    if let Some(from) = row.dnd_release_payload::<usize>()
+                        && *from != i
+                    {
+                        moved = Some((*from, i));
+                    }
+                    if row.dnd_hover_payload::<usize>().is_some() {
+                        ui.painter().hline(
+                            row.rect.x_range(),
+                            row.rect.top(),
+                            egui::Stroke::new(2.0, theme::BRASS_BRIGHT),
+                        );
+                    }
+                }
+            });
+        if let Some((from, to)) = moved {
+            changes.push(Change::MoveTo {
+                node: RNode::Step(from),
+                to,
+            });
         }
         if let Some(node) = go {
             self.go_to(node);
@@ -3961,6 +4029,7 @@ struct Viewer<'a> {
     edits: &'a mut HashMap<(RNode, String), String>,
     /// Node sizes as last drawn, for the frames of open groups.
     last_sizes: &'a HashMap<NodeId, Vec2>,
+    show_order: bool,
     changes: Vec<Change>,
     /// Groups to open or close, ungroup, or rename.
     group_changes: Vec<GroupChange>,
@@ -4289,6 +4358,22 @@ impl SnarlViewer<GNode> for Viewer<'_> {
                     theme::BRASS_BRIGHT,
                 );
             }
+        }
+        if self.show_order {
+            let drawn: HashMap<GNode, Rect> = snarl
+                .nodes_pos_ids()
+                .map(|(id, pos, node)| {
+                    let size = self
+                        .last_sizes
+                        .get(&id)
+                        .copied()
+                        .unwrap_or(vec2(240.0, 100.0));
+                    (*node, Rect::from_min_size(pos, size))
+                })
+                .collect();
+            let group_of = |s: usize| self.nodes.get(&RNode::Step(s)).and_then(|p| p.group);
+            let path = order::run_path(self.steps, &drawn, self.groups, group_of);
+            order::draw(painter, &path);
         }
     }
 

@@ -935,6 +935,13 @@ fn recipe_view(ui: &mut egui::Ui, state: &mut EditorState, plugin: &Plugin) {
                 let (steps, outputs, _) = graph.status();
                 if !text {
                     graph.nav.toolbar(ui, &name);
+                    let order = if graph.show_order {
+                        "Hide the order steps run in"
+                    } else {
+                        "Show the order steps run in: a numbered path from each step to the next"
+                    };
+                    ui.toggle_value(&mut graph.show_order, "1→2")
+                        .on_hover_text(order);
                     ui.add_space(8.0);
                 }
                 ui.label(kit::hint(format!("{steps} steps · {outputs} outputs")));
@@ -1093,6 +1100,8 @@ pub enum GraphCommand {
     GroupAutomatically(bool),
     /// Shows the recipe as text (`true`) or as the graph.
     ShowText(bool),
+    /// Draws the order steps run in over the graph, or stops.
+    ShowOrder(bool),
 }
 
 /// Runs a graph command on the plugin shown (it must have been drawn once, to be open).
@@ -1131,7 +1140,8 @@ pub fn script(state: &mut EditorState, command: &GraphCommand) -> Result<(), Str
             | GraphCommand::CloseGroup(_)
             | GraphCommand::Ungroup(_)
             | GraphCommand::GroupAutomatically(_)
-            | GraphCommand::ShowText(_) => {
+            | GraphCommand::ShowText(_)
+            | GraphCommand::ShowOrder(_) => {
                 return Err("this plugin is a composition".into());
             }
         }
@@ -1159,6 +1169,7 @@ pub fn script(state: &mut EditorState, command: &GraphCommand) -> Result<(), Str
         GraphCommand::CloseGroup(name) => graph.set_group_open(graph.group_named(name)?, false),
         GraphCommand::Ungroup(name) => graph.ungroup(graph.group_named(name)?),
         GraphCommand::ShowText(_) => {}
+        GraphCommand::ShowOrder(show) => graph.show_order = *show,
         GraphCommand::GroupAutomatically(by_outputs) => {
             graph.ungroup_all();
             graph.group_automatically(*by_outputs);
