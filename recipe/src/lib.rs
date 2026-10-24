@@ -8,6 +8,7 @@ pub mod assets;
 pub mod check;
 mod collision;
 pub mod compose;
+pub mod edit;
 pub mod preview;
 mod sprite;
 pub mod text;
