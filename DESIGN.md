@@ -809,8 +809,16 @@ screen's layout (plugins on the left, the selected one on the right):
   adds the graph's state (steps that ran, wires, missing inputs, error, nodes drawn, groups,
   unsaved).
 
-Not yet: an action timeline (hit windows, spawns and holds dragged on a time line with live
-playback), previews of a role's animation in the role menu, and moving the comment above a step
+- **Action timeline** (`editor/src/timeline.rs`): the Inspector of a character (a sprite or
+  model output with one) starts with its **Actions**: pick one, and its times sit on a time
+  line: the animation (to `duration`, then "held" for a hold), when another action can cut in,
+  when it can't be hurt, each hit window (with its damage) and each spawn (with its
+  projectile). Dragging an edge or a marker snaps to 60 Hz frames and writes that one number
+  into `recipe.ron` (only times the recipe writes can be dragged). Clicking the ruler looks at
+  a moment, ▶ plays the action again and again; a sprite character's frame at that moment shows
+  above, outlined while a hit is live.
+
+Not yet: previews of a role's animation in the role menu, and moving the comment above a step
 with it.
 
 ### 7.5 Remote control (for testing)

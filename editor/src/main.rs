@@ -36,6 +36,7 @@ mod state;
 mod surfaces;
 mod terrains;
 mod theme;
+mod timeline;
 mod title_logo;
 mod ui;
 mod watch;

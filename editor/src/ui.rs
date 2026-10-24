@@ -126,7 +126,7 @@ pub fn editor_ui(
     mut dialogs: Local<Dialogs>,
     mut shell: Local<Shell>,
     mut browser: ResMut<Browser>,
-    extractions: Res<Extractions>,
+    mut extractions: ResMut<Extractions>,
     mut themed: Local<bool>,
     mut agents_checked: Local<f64>,
     mut settings: ResMut<Settings>,
@@ -221,13 +221,20 @@ pub fn editor_ui(
                 );
                 None
             }
-            Screen::Workshop => Some(workshop_ui::workshop_screen(
-                &mut root,
-                &mut state,
-                &mut browser,
-                &extractions,
-                &settings,
-            )),
+            Screen::Workshop => {
+                let rect = workshop_ui::workshop_screen(
+                    &mut root,
+                    &mut state,
+                    &mut browser,
+                    &extractions,
+                    &settings,
+                );
+                // A character shown in the Inspector needs its plugin run for its actions.
+                if let Some(plugin) = state.workshop.timeline.wanted.take() {
+                    extractions.ensure(&mut state, &plugin);
+                }
+                Some(rect)
+            }
             Screen::Plugins => {
                 crate::plugin_editor::plugin_editor_screen(&mut root, &mut state, &extractions);
                 None
