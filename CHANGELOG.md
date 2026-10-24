@@ -4,6 +4,9 @@
 
 ### Added
 
+- `patches` on area `Image` outputs: parts of an area that animate on their own, each frames
+  the size of that part drawn at its place over the area with its own timing, so a big map
+  with some water doesn't need a whole copy of the map per frame.
 - Scripts: the effect `Run` starts commands that run over time (`Do`, `Wait`, `Until`, `Walk`,
   `Place`, `Hold`, `If`, `Repeat`, `End`), for cutscenes and events. A script can hold the
   player still, and nodes it walks take their behaviors along. The Inspector edits scripts, and

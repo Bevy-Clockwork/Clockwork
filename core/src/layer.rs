@@ -4,7 +4,10 @@
 //! camera, the map itself, and parts drawn over the characters (treetops, roofs). Tiles that
 //! move (water, lava, flowers) are graphics the game swaps every few frames. Both are data here:
 //! an area's [`crate::recipe::Output::Image`] lists its layers (images with a draw order and a
-//! scroll factor) and the frames it cycles through, all made by the recipe's steps.
+//! scroll factor) and the frames it cycles through, all made by the recipe's steps. Animated
+//! tiles that cover little of a large area are patches: frames the size of the part that moves,
+//! drawn at its place over the area, each patch with its own timing, so a big map with some
+//! water doesn't need a copy of the whole map for every frame.
 
 use serde::{Deserialize, Serialize};
 
@@ -47,6 +50,16 @@ pub struct FramesSpec {
     pub fps: f32,
 }
 
+/// A part of an area that animates on its own, as a recipe writes it: frames smaller than the
+/// area, drawn with their top left corner at `at` (pixels) over the area's image.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PatchSpec {
+    pub at: (u32, u32),
+    /// The images, all the same size, and their timing.
+    pub frames: FramesSpec,
+}
+
 fn full_scroll() -> (f32, f32) {
     (1.0, 1.0)
 }
@@ -79,6 +92,14 @@ impl FramesSpec {
             return Some(format!("frames need fps above 0, not {}", self.fps));
         }
         None
+    }
+}
+
+impl PatchSpec {
+    /// What is wrong with its timing, if anything.
+    pub fn problem(&self) -> Option<String> {
+        let frames = self.frames.problem()?;
+        Some(format!("the patch at {:?}: {frames}", self.at))
     }
 }
 
@@ -182,12 +203,32 @@ impl Layer {
     }
 }
 
+/// A part of an area that animates on its own, as extracted: its frames drawn with their top
+/// left corner at `at` (pixels) over the area's image.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Patch {
+    pub at: (u32, u32),
+    pub frames: Frames,
+}
+
+impl Patch {
+    /// Its size in pixels (every frame's).
+    pub fn size(&self) -> (u32, u32) {
+        self.frames
+            .images
+            .first()
+            .map_or((0, 0), |i| (i.width, i.height))
+    }
+}
+
 /// An area's layers and animation, as extracted, besides its image.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Layers {
     /// Images the area's own image cycles through.
     pub frames: Option<Frames>,
     pub layers: Vec<Layer>,
+    /// Parts of the area's image that animate on their own, drawn over it.
+    pub patches: Vec<Patch>,
 }
 
 impl Layers {
@@ -257,6 +298,7 @@ mod tests {
     fn layers_draw_by_order_with_foregrounds_last() {
         let layers = Layers {
             frames: None,
+            patches: Vec::new(),
             layers: vec![
                 layer(1, true),
                 layer(-2, false),

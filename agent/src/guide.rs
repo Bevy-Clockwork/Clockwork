@@ -616,6 +616,13 @@ Image(id: "forest", from: "bg2", kind: Some(Area),
     game copies them), render the same map with each, and list the renders. Every frame must be
     the size of the image it replaces. run_recipe lists the layers back to front and previews
     the area with all of them.
+    A large area with a little water would need a copy of the whole map per frame (each one a
+    texture in Play). Use `patches` instead: `patches: [(at: (x, y), frames: (images: [...],
+    ticks: [8], fps: 59.7275))]`, frames the size of just the part that moves, drawn with their
+    top left corner at (x, y) over the area. Each patch keeps its own timing, so animations of
+    different speeds (water every 8 ticks, flowers every 19) each get their own; crop each
+    frame's render to the cells that use the animated tiles (Crop) and make one patch per
+    group of them.
 
 ## Habits that work
 

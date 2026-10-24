@@ -748,17 +748,23 @@ graphics the game copies into video memory every few frames. Both are data
   still one, each for its ticks at the game's tick rate, looping. A recipe builds one video
   memory per frame of the game's tile animation table and renders the same map with each, so
   every place a tile is used animates. Frames must be the size of the image they replace.
+- **Patches:** `patches` on the area: parts of it that animate on their own, each frames the
+  size of that part drawn with their top left corner at `at` over the area, with their own
+  timing. A big map with a little water costs a texture the size of the water per frame, not
+  the whole map, and animations of different speeds each keep theirs. Their frames must all be
+  one size and lie inside the area.
 - **Viewport** (`editor/src/layers.rs`): each layer is a plane a little above or below the area
   in draw order, layers over sprites above the sprites; frames swap textures; while playing,
   layers move with the camera by what their scroll leaves out (wrapping ones move their
   texture). The Workshop shows them unscrolled. Clicks go through layers to what is under them.
+  Patches are planes the size of each, just above the area's image.
 - **Checks and previews:** frame timing and scroll are checked when a plugin is saved, a frame
   of the wrong size fails the extraction, and `run_recipe` lists the layers back to front and
   previews the area with all of them.
 
 Not yet: layers that scroll on their own (moving clouds, waterfalls by offset), palette
 animation (colors cycling instead of tiles), per-layer blending and window effects, and
-hardware tile animation without rendering each frame's whole map.
+patches on layers (only the area's own image has them).
 
 ### 7.10.4 Scripts (implemented)
 
