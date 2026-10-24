@@ -357,63 +357,65 @@ pub fn place_system(
         place_entity(&mut state, &terrains, &orbit, &window, &camera, behavior);
         return;
     }
-    let Some(request) = state.workshop.place_request.take() else {
-        return;
-    };
     let (camera, camera_transform) = *camera;
-    let ray = request
-        .at_cursor
-        .then(|| window.cursor_position())
-        .flatten()
-        .and_then(|cursor| camera.viewport_to_world(camera_transform, cursor).ok());
-    let mut ground = ray
-        .and_then(|ray| {
-            let d = ray.intersect_plane(Vec3::ZERO, InfinitePlane3d::new(Vec3::Y))?;
-            Some(ray.get_point(d))
-        })
-        .unwrap_or(Vec3::new(orbit.focus.x, 0.0, orbit.focus.z));
-    // Characters and objects dropped onto a 3D world land on its ground, under the cursor (or
-    // where the camera looks when there is no cursor); areas keep to the ground plane.
-    let on_ground = drops_on_ground(&state, &request.item);
-    if on_ground {
-        // Without a cursor, where the camera looks: the ray through the center of the view.
-        let looking = Dir3::new(orbit.focus - camera_transform.translation())
-            .ok()
-            .map(|direction| Ray3d::new(camera_transform.translation(), direction));
-        if let Some(hit) = ray.or(looking).and_then(|r| terrains.raycast_floor(r)) {
-            ground = hit;
+    // Several items dropped at once are spread out in a row from where they were dropped.
+    let requests = std::mem::take(&mut state.workshop.place_requests);
+    for (n, request) in requests.into_iter().enumerate() {
+        let ray = request
+            .at_cursor
+            .then(|| window.cursor_position())
+            .flatten()
+            .and_then(|cursor| camera.viewport_to_world(camera_transform, cursor).ok());
+        let mut ground = ray
+            .and_then(|ray| {
+                let d = ray.intersect_plane(Vec3::ZERO, InfinitePlane3d::new(Vec3::Y))?;
+                Some(ray.get_point(d))
+            })
+            .unwrap_or(Vec3::new(orbit.focus.x, 0.0, orbit.focus.z));
+        // Characters and objects dropped onto a 3D world land on its ground, under the cursor (or
+        // where the camera looks when there is no cursor); areas keep to the ground plane.
+        let on_ground = drops_on_ground(&state, &request.item);
+        if on_ground {
+            // Without a cursor, where the camera looks: the ray through the center of the view.
+            let looking = Dir3::new(orbit.focus - camera_transform.translation())
+                .ok()
+                .map(|direction| Ray3d::new(camera_transform.translation(), direction));
+            if let Some(hit) = ray.or(looking).and_then(|r| terrains.raycast_floor(r)) {
+                ground = hit;
+            }
         }
-    }
+        ground.x += n as f32 * 1.5;
 
-    let scene = &mut state.workshop.scene;
-    let first_item = !scene.nodes.iter().any(|n| n.item.is_some());
-    // Positions are stored relative to the parent. Dropped onto a node in the scene tree (not
-    // the viewport), the item goes to that node's origin.
-    let local = if !request.at_cursor && request.parent != ROOT {
-        // Onto a 3D area in the tree: at its start point, if it has one.
-        match terrains.spawn_of(request.parent).filter(|_| on_ground) {
-            Some((spawn, _)) => scene
-                .world_transform(request.parent)
+        let scene = &mut state.workshop.scene;
+        let first_item = !scene.nodes.iter().any(|n| n.item.is_some());
+        // Positions are stored relative to the parent. Dropped onto a node in the scene tree (not
+        // the viewport), the item goes to that node's origin.
+        let local = if !request.at_cursor && request.parent != ROOT {
+            // Onto a 3D area in the tree: at its start point, if it has one.
+            match terrains.spawn_of(request.parent).filter(|_| on_ground) {
+                Some((spawn, _)) => scene
+                    .world_transform(request.parent)
+                    .compute_affine()
+                    .inverse()
+                    .transform_point3(spawn),
+                None => Vec3::ZERO,
+            }
+        } else {
+            let parent_world = scene.world_transform(request.parent);
+            parent_world
                 .compute_affine()
                 .inverse()
-                .transform_point3(spawn),
-            None => Vec3::ZERO,
-        }
-    } else {
-        let parent_world = scene.world_transform(request.parent);
-        parent_world
-            .compute_affine()
-            .inverse()
-            .transform_point3(ground)
-    };
-    let title = request.item.output.replace(['_', '-'], " ");
-    let name = format!("{} · {}", capitalize(&title), request.item.plugin);
-    let id = scene.add(request.parent, name, Some(request.item), local);
+                .transform_point3(ground)
+        };
+        let title = request.item.output.replace(['_', '-'], " ");
+        let name = format!("{} · {}", capitalize(&title), request.item.plugin);
+        let id = scene.add(request.parent, name, Some(request.item), local);
 
-    state.workshop.selected_node = Some(id);
-    state.workshop.adjusting = Some(id);
-    if first_item {
-        view.frame = Some(id);
+        state.workshop.selected_node = Some(id);
+        state.workshop.adjusting = Some(id);
+        if first_item {
+            view.frame = Some(id);
+        }
     }
 }
 

@@ -84,6 +84,8 @@ impl Item {
 pub enum Category {
     #[default]
     All,
+    /// One of [`KIND_GROUPS`].
+    Group(usize),
     Kind(Kind),
     Other,
 }
@@ -100,6 +102,8 @@ pub enum BottomTab {
 pub struct DraggedItem {
     pub plugin: usize,
     pub output: String,
+    /// The other selected items that can be placed, dragged with it: (plugin, output).
+    pub more: Vec<(usize, String)>,
 }
 
 #[derive(Resource)]
@@ -110,7 +114,14 @@ pub struct Browser {
     /// Game filter: `None` shows all games.
     pub game: Option<String>,
     pub thumb_size: f32,
+    /// The asset the Inspector shows: the one clicked last.
     pub selected: Option<AssetId>,
+    /// Every selected asset, `selected` among them: Ctrl+click selects more.
+    pub picked: Vec<AssetId>,
+    /// Plugin filter, inside the game filter: `None` shows all of the game's plugins.
+    pub plugin: Option<String>,
+    /// Rows instead of thumbnails.
+    pub list: bool,
     /// Preview textures by (plugin name, output id).
     previews: HashMap<(String, String), egui::TextureHandle>,
     /// Plugins (by cache key) whose previews are loaded, being made, or failed.
@@ -127,6 +138,31 @@ pub struct Browser {
     keys: Option<(u64, Vec<PluginKey>)>,
 }
 
+impl Browser {
+    /// Selects just this asset.
+    pub fn select(&mut self, id: AssetId) {
+        self.picked = vec![id.clone()];
+        self.selected = Some(id);
+    }
+
+    /// Adds an asset to the selection, or takes it out.
+    pub fn toggle(&mut self, id: AssetId) {
+        if let Some(i) = self.picked.iter().position(|p| *p == id) {
+            self.picked.remove(i);
+            if self.selected.as_ref() == Some(&id) {
+                self.selected = self.picked.last().cloned();
+            }
+        } else {
+            self.picked.push(id.clone());
+            self.selected = Some(id);
+        }
+    }
+
+    pub fn is_selected(&self, id: &AssetId) -> bool {
+        self.selected.as_ref() == Some(id) || self.picked.contains(id)
+    }
+}
+
 impl Default for Browser {
     fn default() -> Self {
         Self {
@@ -136,6 +172,9 @@ impl Default for Browser {
             game: None,
             thumb_size: 96.0,
             selected: None,
+            picked: Vec::new(),
+            plugin: None,
+            list: false,
             previews: HashMap::new(),
             handled: HashSet::new(),
             failed: HashMap::new(),
@@ -515,90 +554,283 @@ fn generate(extracted: &Extracted, key: &str) -> Vec<(String, RgbaImage)> {
 // ---------------------------------------------------------------------------------------------
 // UI
 
-fn matches(item: &Item, browser: &Browser) -> bool {
-    let category = match browser.category {
+/// The kinds of assets, in the groups the sidebar shows them in.
+pub const KIND_GROUPS: &[(&str, &[Kind])] = &[
+    (
+        "World",
+        &[Kind::Area, Kind::Tileset, Kind::Object, Kind::Camera],
+    ),
+    (
+        "Characters",
+        &[
+            Kind::Character,
+            Kind::Sprite,
+            Kind::Animation,
+            Kind::Movement,
+            Kind::Ability,
+            Kind::Stats,
+            Kind::Behavior,
+        ],
+    ),
+    (
+        "Interface",
+        &[
+            Kind::Hud,
+            Kind::Ui,
+            Kind::Menu,
+            Kind::Dialog,
+            Kind::Font,
+            Kind::Input,
+        ],
+    ),
+    ("Game", &[Kind::Game, Kind::Rules, Kind::Flow]),
+    ("Sound", &[Kind::Audio]),
+];
+
+/// The symbol a kind of asset is drawn with where it has no preview.
+pub fn kind_icon(kind: Option<Kind>) -> &'static str {
+    match kind {
+        Some(Kind::Area) => "🗺",
+        Some(Kind::Tileset) => "▦",
+        Some(Kind::Object) => "◈",
+        Some(Kind::Camera) => "📷",
+        Some(Kind::Character) => "☺",
+        Some(Kind::Sprite) => "🖼",
+        Some(Kind::Animation) => "🎞",
+        Some(Kind::Movement) => "➠",
+        Some(Kind::Ability) => "⚔",
+        Some(Kind::Stats) => "♥",
+        Some(Kind::Behavior) => "⚙",
+        Some(Kind::Hud) => "▤",
+        Some(Kind::Ui) => "◧",
+        Some(Kind::Menu) => "☰",
+        Some(Kind::Dialog) => "🗨",
+        Some(Kind::Font) => "A",
+        Some(Kind::Input) => "🎮",
+        Some(Kind::Game) => "★",
+        Some(Kind::Rules) => "⚖",
+        Some(Kind::Flow) => "⇄",
+        Some(Kind::Audio) => "♪",
+        None => "◇",
+    }
+}
+
+/// A search, read from what was typed: `kind:sprite plugin:tmc is:placeable sword`. Every part
+/// must match; words match the title, plugin, game or kind.
+#[derive(Debug, Default, PartialEq)]
+struct Query {
+    words: Vec<String>,
+    kinds: Vec<String>,
+    plugins: Vec<String>,
+    games: Vec<String>,
+    /// `placeable`, `ready` or `missing` (its game's ROM is not in the Library).
+    is: Vec<String>,
+}
+
+impl Query {
+    fn parse(text: &str) -> Self {
+        let mut query = Query::default();
+        for part in text.to_lowercase().split_whitespace() {
+            let (list, value) = match part.split_once(':') {
+                Some(("kind", v)) => (&mut query.kinds, v),
+                Some(("plugin", v)) => (&mut query.plugins, v),
+                Some(("game", v)) => (&mut query.games, v),
+                Some(("is", v)) => (&mut query.is, v),
+                _ => (&mut query.words, part),
+            };
+            if !value.is_empty() {
+                list.push(value.to_string());
+            }
+        }
+        query
+    }
+
+    fn matches(&self, item: &Item) -> bool {
+        let kind = [
+            item.kind.map(|k| k.singular()).unwrap_or_default(),
+            item.kind.map(|k| k.label()).unwrap_or_default(),
+            item.asset_kind,
+        ]
+        .map(str::to_lowercase);
+        let has = |s: &str, part: &str| s.to_lowercase().contains(part);
+        self.kinds
+            .iter()
+            .all(|k| kind.iter().any(|s| s.contains(k)))
+            && self.plugins.iter().all(|p| has(&item.plugin_name, p))
+            && self.games.iter().all(|g| has(&item.game, g))
+            && self.is.iter().all(|is| match is.as_str() {
+                "placeable" => item.placeable,
+                "ready" => item.ready,
+                "missing" => !item.ready,
+                _ => false,
+            })
+            && self.words.iter().all(|w| {
+                has(&item.title(), w)
+                    || has(&item.plugin_name, w)
+                    || has(&item.game, w)
+                    || kind.iter().any(|s| s.contains(w))
+            })
+    }
+}
+
+fn in_category(item: &Item, category: Category) -> bool {
+    match category {
         Category::All => true,
+        Category::Group(g) => KIND_GROUPS
+            .get(g)
+            .is_some_and(|(_, kinds)| item.kind.is_some_and(|k| kinds.contains(&k))),
         Category::Kind(kind) => item.kind == Some(kind),
         Category::Other => item.kind.is_none(),
+    }
+}
+
+fn matches(item: &Item, browser: &Browser) -> bool {
+    in_category(item, browser.category)
+        && browser.game.as_ref().is_none_or(|g| *g == item.game)
+        && browser
+            .plugin
+            .as_ref()
+            .is_none_or(|p| *p == item.plugin_name)
+        && Query::parse(&browser.search).matches(item)
+}
+
+/// The sidebar: kinds in their groups, then games and their plugins, each with how many assets
+/// it has. Choosing one shows only its assets.
+fn sidebar(ui: &mut egui::Ui, all: &[Item], browser: &mut Browser) {
+    let count = |c: Category| all.iter().filter(|i| in_category(i, c)).count();
+    let row = |ui: &mut egui::Ui, on: bool, text: String, indent: f32| {
+        ui.horizontal(|ui| {
+            ui.add_space(indent);
+            ui.add(egui::Button::selectable(on, text).frame_when_inactive(false))
+        })
+        .inner
     };
-    let game = browser.game.as_ref().is_none_or(|g| *g == item.game);
-    let query = browser.search.to_lowercase();
-    let search = query.is_empty()
-        || [
-            item.title(),
-            item.plugin_name.clone(),
-            item.game.clone(),
-            item.kind.map(|k| k.label().to_string()).unwrap_or_default(),
-        ]
-        .iter()
-        .any(|s| s.to_lowercase().contains(&query));
-    category && game && search
+    egui::ScrollArea::vertical()
+        .id_salt("browser_sidebar")
+        .auto_shrink(false)
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 1.0;
+            ui.label(crate::kit::dim("KINDS"));
+            let on = browser.category == Category::All;
+            if row(ui, on, format!("All  ({})", all.len()), 0.0).clicked() {
+                browser.category = Category::All;
+            }
+            for (g, (name, kinds)) in KIND_GROUPS.iter().enumerate() {
+                let n = count(Category::Group(g));
+                if n == 0 {
+                    continue;
+                }
+                let on = browser.category == Category::Group(g);
+                if row(ui, on, format!("{name}  ({n})"), 0.0).clicked() {
+                    browser.category = Category::Group(g);
+                }
+                // A group's kinds show while it, or one of them, is chosen.
+                let open =
+                    on || matches!(browser.category, Category::Kind(k) if kinds.contains(&k));
+                if open {
+                    for kind in kinds.iter().copied() {
+                        let n = count(Category::Kind(kind));
+                        if n == 0 {
+                            continue;
+                        }
+                        let on = browser.category == Category::Kind(kind);
+                        let text = format!("{}  {}  ({n})", kind_icon(Some(kind)), kind.label());
+                        if row(ui, on, text, 12.0).clicked() {
+                            browser.category = Category::Kind(kind);
+                        }
+                    }
+                }
+            }
+            let n = count(Category::Other);
+            if n > 0 {
+                let on = browser.category == Category::Other;
+                if row(ui, on, format!("Other  ({n})"), 0.0).clicked() {
+                    browser.category = Category::Other;
+                }
+            }
+
+            ui.add_space(8.0);
+            ui.label(crate::kit::dim("SOURCES"));
+            let on = browser.game.is_none() && browser.plugin.is_none();
+            if row(ui, on, "Everything".into(), 0.0).clicked() {
+                browser.game = None;
+                browser.plugin = None;
+            }
+            let mut games: Vec<&str> = all.iter().map(|i| i.game.as_str()).collect();
+            games.sort();
+            games.dedup();
+            for game in games {
+                let n = all.iter().filter(|i| i.game == game).count();
+                let on = browser.game.as_deref() == Some(game) && browser.plugin.is_none();
+                if row(ui, on, format!("{game}  ({n})"), 0.0).clicked() {
+                    browser.game = Some(game.to_string());
+                    browser.plugin = None;
+                }
+                if browser.game.as_deref() != Some(game) {
+                    continue;
+                }
+                let mut plugins: Vec<&str> = all
+                    .iter()
+                    .filter(|i| i.game == game)
+                    .map(|i| i.plugin_name.as_str())
+                    .collect();
+                plugins.sort();
+                plugins.dedup();
+                for plugin in plugins {
+                    let n = all.iter().filter(|i| i.plugin_name == plugin).count();
+                    let on = browser.plugin.as_deref() == Some(plugin);
+                    if row(ui, on, format!("◆  {plugin}  ({n})"), 12.0).clicked() {
+                        browser.plugin = Some(plugin.to_string());
+                    }
+                }
+            }
+        });
+    if browser.category != Category::All && count(browser.category) == 0 {
+        browser.category = Category::All;
+    }
 }
 
 /// The content browser panel. Returns an item to open, if the user opened one.
 pub fn content_panel(ui: &mut egui::Ui, state: &mut EditorState, browser: &mut Browser) {
     let all = cached_items(state, browser);
 
-    // Filters and thumbnail size, then the category tabs (only kinds that exist), which wrap.
+    // The search, how items are shown and their size; the sidebar, then the items.
     ui.horizontal(|ui| {
-        crate::kit::search_field(ui, &mut browser.search, "Search content…", 180.0);
-        let mut games: Vec<String> = all.iter().map(|i| i.game.clone()).collect();
-        games.sort();
-        games.dedup();
-        egui::ComboBox::from_id_salt("game_filter")
-            .selected_text(browser.game.clone().unwrap_or_else(|| "All games".into()))
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut browser.game, None, "All games");
-                for g in games {
-                    ui.selectable_value(&mut browser.game, Some(g.clone()), g);
-                }
-            });
+        crate::kit::search_field(ui, &mut browser.search, "Search content…", 220.0).on_hover_text(
+            "Words match names, plugins, games and kinds. Also kind:sprite, plugin:tmc, \
+                 game:minish, is:placeable, is:missing",
+        );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.add(
-                egui::Slider::new(&mut browser.thumb_size, 64.0..=160.0)
-                    .step_by(8.0)
-                    .show_value(false)
-                    .text("Size"),
+            crate::kit::segmented(
+                ui,
+                &mut browser.list,
+                &[(true, "☰", "List"), (false, "▦", "Thumbnails")],
             );
+            if !browser.list {
+                ui.add(
+                    egui::Slider::new(&mut browser.thumb_size, 64.0..=160.0)
+                        .step_by(8.0)
+                        .show_value(false)
+                        .text("Size"),
+                );
+            }
+            let picked = browser.picked.len();
+            if picked > 1 {
+                ui.label(crate::kit::hint(format!("{picked} selected")));
+            }
         });
     });
-    ui.horizontal_wrapped(|ui| {
-        let count = |c: Category| {
-            all.iter()
-                .filter(|i| match c {
-                    Category::All => true,
-                    Category::Kind(k) => i.kind == Some(k),
-                    Category::Other => i.kind.is_none(),
-                })
-                .count()
-        };
-        let mut tabs = vec![Category::All];
-        tabs.extend(
-            Kind::ALL
-                .iter()
-                .map(|k| Category::Kind(*k))
-                .filter(|c| count(*c) > 0),
-        );
-        if count(Category::Other) > 0 {
-            tabs.push(Category::Other);
-        }
-        if !tabs.contains(&browser.category) {
-            browser.category = Category::All;
-        }
-        for tab in tabs {
-            let label = match tab {
-                Category::All => "All",
-                Category::Kind(k) => k.label(),
-                Category::Other => "Other",
-            };
-            ui.selectable_value(
-                &mut browser.category,
-                tab,
-                format!("{label} ({})", count(tab)),
-            );
-        }
-    });
     ui.add_space(4.0);
+
+    egui::Panel::left("browser_sidebar")
+        .resizable(true)
+        .default_size(170.0)
+        .size_range(120.0..=320.0)
+        .frame(egui::Frame::new().inner_margin(egui::Margin {
+            right: 6,
+            ..Default::default()
+        }))
+        .show(ui, |ui| sidebar(ui, &all, browser));
 
     let shown: Vec<&Item> = all.iter().filter(|i| matches(i, browser)).collect();
     if all.is_empty() {
@@ -620,26 +852,49 @@ pub fn content_panel(ui: &mut egui::Ui, state: &mut EditorState, browser: &mut B
         return;
     }
 
+    // What a drag carries: every selected item that can be placed, the dragged one first.
+    let placeable: Vec<(usize, String, AssetId)> = all
+        .iter()
+        .filter(|i| i.ready && i.placeable && browser.is_selected(&i.id()))
+        .filter_map(|i| Some((i.plugin?, i.output.clone(), i.id())))
+        .collect();
+
     let mut open_item: Option<(usize, String)> = None;
     let openable = |item: &Item| item.plugin.filter(|_| item.placeable);
     // A behavior asset is placed as a node that follows it.
     let mut place_behavior: Option<OutputRef> = None;
     let mut clicked = false;
     egui::ScrollArea::vertical()
+        .id_salt("browser_items")
         .auto_shrink(false)
         .show(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = vec2(10.0, 10.0);
-                for item in shown {
-                    let (opened, was_clicked) = card(ui, item, browser);
-                    clicked |= was_clicked;
-                    if opened && let Some(plugin) = openable(item) {
-                        open_item = Some((plugin, item.output.clone()));
-                    } else if opened && item.asset_kind == "Behavior" {
-                        place_behavior = Some(OutputRef::new(&item.plugin_name, &item.output));
-                    }
+            let mut each = |ui: &mut egui::Ui,
+                            browser: &mut Browser,
+                            item: &Item,
+                            response: egui::Response| {
+                let (opened, was_clicked) = interact(ui, item, response, browser, &placeable);
+                clicked |= was_clicked;
+                if opened && let Some(plugin) = openable(item) {
+                    open_item = Some((plugin, item.output.clone()));
+                } else if opened && item.asset_kind == "Behavior" {
+                    place_behavior = Some(OutputRef::new(&item.plugin_name, &item.output));
                 }
-            });
+            };
+            if browser.list {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                for (n, item) in shown.into_iter().enumerate() {
+                    let response = list_row(ui, item, browser, n);
+                    each(ui, browser, item, response);
+                }
+            } else {
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = vec2(10.0, 10.0);
+                    for item in shown {
+                        let response = card(ui, item, browser);
+                        each(ui, browser, item, response);
+                    }
+                });
+            }
         });
 
     // Enter opens the selected item, as long as no text field has focus.
@@ -665,13 +920,130 @@ pub fn content_panel(ui: &mut egui::Ui, state: &mut EditorState, browser: &mut B
     }
 }
 
-/// One item card. Returns (double-clicked, clicked).
-fn card(ui: &mut egui::Ui, item: &Item, browser: &mut Browser) -> (bool, bool) {
+/// What clicking, dragging and hovering an item does, the same for cards and rows: a click
+/// selects it, Ctrl+click adds it to the selection (or takes it out), a drag carries it and
+/// the rest of the selection. Returns (opened, clicked).
+fn interact(
+    ui: &egui::Ui,
+    item: &Item,
+    response: egui::Response,
+    browser: &mut Browser,
+    placeable: &[(usize, String, AssetId)],
+) -> (bool, bool) {
+    let response = response.on_hover_text(format!(
+        "{} · {}\nPlugin: {}\n{}",
+        item.title(),
+        item.game,
+        item.plugin_name,
+        if item.asset_kind == "Behavior" {
+            "Double-click to place a node that follows it"
+        } else if !item.placeable {
+            "Select it to see what it uses and what uses it"
+        } else if item.ready {
+            "Double-click or drag into the viewport to show it. Ctrl+click selects more"
+        } else {
+            "Import this game's ROM into the Library to use it"
+        }
+    ));
+    let id = item.id();
+    let toggle = ui.input(|i| i.modifiers.command);
+    if response.clicked() && toggle {
+        browser.toggle(id.clone());
+    } else if response.clicked() || (response.drag_started() && !browser.is_selected(&id)) {
+        browser.select(id.clone());
+    }
+    if item.ready
+        && item.placeable
+        && let Some(plugin) = item.plugin
+    {
+        response.dnd_set_drag_payload(DraggedItem {
+            plugin,
+            output: item.output.clone(),
+            more: placeable
+                .iter()
+                .filter(|(_, _, other)| *other != id && browser.is_selected(&id))
+                .map(|(p, o, _)| (*p, o.clone()))
+                .collect(),
+        });
+    }
+    (
+        response.double_clicked() && (item.ready || item.asset_kind == "Behavior"),
+        response.clicked(),
+    )
+}
+
+/// One item as a row of the list: its symbol, name, kind, plugin and game.
+fn list_row(ui: &mut egui::Ui, item: &Item, browser: &Browser, n: usize) -> egui::Response {
+    let width = ui.available_width();
+    let (rect, response) = ui.allocate_exact_size(vec2(width, 24.0), egui::Sense::click_and_drag());
+    let selected = browser.is_selected(&item.id());
+    let fill = if selected {
+        theme::SELECTED
+    } else if response.hovered() {
+        theme::RAISED
+    } else if n % 2 == 1 {
+        Color32::from_white_alpha(4)
+    } else {
+        Color32::TRANSPARENT
+    };
+    let painter = ui.painter();
+    painter.rect_filled(rect, 3.0, fill);
+    let y = rect.center().y;
+    painter.text(
+        egui::pos2(rect.left() + 14.0, y),
+        egui::Align2::CENTER_CENTER,
+        kind_icon(item.kind),
+        egui::FontId::proportional(13.0),
+        theme::BRASS,
+    );
+    let columns = [
+        (item.title(), 0.0, theme::PARCHMENT),
+        (
+            item.kind
+                .map_or(item.asset_kind, |k| k.singular())
+                .to_string(),
+            0.45,
+            theme::PARCHMENT_DIM,
+        ),
+        (item.plugin_name.clone(), 0.62, theme::PARCHMENT_DIM),
+        (
+            if item.ready {
+                item.game.clone()
+            } else {
+                format!("{} (needs ROM)", item.game)
+            },
+            0.80,
+            theme::PARCHMENT_DIM,
+        ),
+    ];
+    let left = rect.left() + 30.0;
+    let span = rect.width() - 30.0;
+    for (i, (text, at, color)) in columns.iter().enumerate() {
+        let end = columns.get(i + 1).map_or(1.0, |c| c.1);
+        let chars = ((end - at) * span / 7.0) as usize;
+        let color = if selected && i == 0 {
+            theme::BRASS_BRIGHT
+        } else {
+            *color
+        };
+        painter.text(
+            egui::pos2(left + at * span, y),
+            egui::Align2::LEFT_CENTER,
+            crate::ui::truncate(text, chars.max(4)),
+            egui::FontId::proportional(12.5),
+            color,
+        );
+    }
+    response
+}
+
+/// One item card.
+fn card(ui: &mut egui::Ui, item: &Item, browser: &Browser) -> egui::Response {
     let size = browser.thumb_size;
     let (rect, response) =
         ui.allocate_exact_size(vec2(size, size + 34.0), egui::Sense::click_and_drag());
     let thumb = egui::Rect::from_min_size(rect.min, vec2(size, size));
-    let selected = browser.selected.as_ref() == Some(&item.id());
+    let selected = browser.is_selected(&item.id());
     let painter = ui.painter();
 
     painter.rect_filled(thumb, 3.0, theme::BG_DEEP);
@@ -718,15 +1090,26 @@ fn card(ui: &mut egui::Ui, item: &Item, browser: &mut Browser) -> (bool, bool) {
             } else {
                 0.0
             };
-            theme::gear(
-                painter,
-                thumb.center() - vec2(0.0, 8.0),
-                size * 0.18,
-                10,
-                t,
-                theme::RAISED,
-                theme::BG_DEEP,
-            );
+            if item.placeable {
+                theme::gear(
+                    painter,
+                    thumb.center() - vec2(0.0, 8.0),
+                    size * 0.18,
+                    10,
+                    t,
+                    theme::RAISED,
+                    theme::BG_DEEP,
+                );
+            } else {
+                // Kinds that are not pictures are shown by their symbol.
+                painter.text(
+                    thumb.center() - vec2(0.0, 8.0),
+                    egui::Align2::CENTER_CENTER,
+                    kind_icon(item.kind),
+                    egui::FontId::proportional(size * 0.34),
+                    theme::BRASS_DIM,
+                );
+            }
             painter.text(
                 thumb.center() + vec2(0.0, size * 0.22),
                 egui::Align2::CENTER_CENTER,
@@ -796,42 +1179,75 @@ fn card(ui: &mut egui::Ui, item: &Item, browser: &mut Browser) -> (bool, bool) {
         theme::PARCHMENT_DIM,
     );
 
-    let response = response.on_hover_text(format!(
-        "{} · {}\nPlugin: {}\n{}",
-        item.title(),
-        item.game,
-        item.plugin_name,
-        if item.asset_kind == "Behavior" {
-            "Double-click to place a node that follows it"
-        } else if !item.placeable {
-            "Select it to see what it uses and what uses it"
-        } else if item.ready {
-            "Double-click or drag into the viewport to show it"
-        } else {
-            "Import this game's ROM into the Library to use it"
-        }
-    ));
-    if response.clicked() || response.drag_started() {
-        browser.selected = Some(item.id());
-    }
-    if item.ready
-        && item.placeable
-        && let Some(plugin) = item.plugin
-    {
-        response.dnd_set_drag_payload(DraggedItem {
-            plugin,
-            output: item.output.clone(),
-        });
-    }
-    (
-        response.double_clicked() && (item.ready || item.asset_kind == "Behavior"),
-        response.clicked(),
-    )
+    response
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn item(output: &str, kind: Option<Kind>, asset_kind: &'static str) -> Item {
+        Item {
+            plugin: Some(0),
+            plugin_name: "tmc-link".into(),
+            output: output.into(),
+            kind,
+            asset_kind,
+            placeable: kind == Some(Kind::Sprite),
+            game: "The Minish Cap".into(),
+            ready: true,
+        }
+    }
+
+    #[test]
+    fn every_kind_is_in_one_group() {
+        for kind in Kind::ALL {
+            let groups = KIND_GROUPS
+                .iter()
+                .filter(|(_, k)| k.contains(&kind))
+                .count();
+            assert_eq!(groups, 1, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn typed_searches_narrow_by_kind_plugin_game_and_state() {
+        let sword = item("sword_slash", Some(Kind::Ability), "Ability");
+        let sprite = item("link_walk", Some(Kind::Sprite), "Sprite");
+        let found = |q: &str| {
+            let query = Query::parse(q);
+            [&sword, &sprite]
+                .into_iter()
+                .filter(|i| query.matches(i))
+                .map(|i| i.output.as_str())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(found(""), ["sword_slash", "link_walk"]);
+        assert_eq!(found("kind:sprite"), ["link_walk"]);
+        assert_eq!(found("kind:abil slash"), ["sword_slash"]);
+        assert_eq!(found("is:placeable"), ["link_walk"]);
+        assert_eq!(found("game:minish Walk"), ["link_walk"]);
+        assert!(found("plugin:sm64").is_empty());
+        assert!(found("is:missing").is_empty());
+        // Every word has to match.
+        assert!(found("sword walk").is_empty());
+    }
+
+    #[test]
+    fn ctrl_click_adds_to_the_selection_and_takes_out_again() {
+        let mut browser = Browser::default();
+        let a = item("a", None, "Items").id();
+        let b = item("b", None, "Items").id();
+        browser.select(a.clone());
+        browser.toggle(b.clone());
+        assert!(browser.is_selected(&a) && browser.is_selected(&b));
+        assert_eq!(browser.selected, Some(b.clone()));
+        browser.toggle(b.clone());
+        assert!(!browser.is_selected(&b));
+        assert_eq!(browser.selected, Some(a.clone()));
+        browser.select(b.clone());
+        assert!(!browser.is_selected(&a));
+    }
 
     #[test]
     fn only_outdated_previews_of_installed_plugins_are_pruned() {

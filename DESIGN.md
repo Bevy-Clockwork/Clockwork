@@ -375,8 +375,17 @@ A Godot-style composer for combining plugins:
 The Workshop's bottom dock lists what plugins provide, not the plugins themselves. It follows
 Godot's FileSystem dock and Blender's Asset Browser (non-modal, non-blocking, select then operate):
 
-- **Items** are a plugin's image outputs, sorted by their `kind` (Area, Tileset, Sprite,
-  Character, Ability, Object, Audio; none → Other). Category tabs only show kinds that exist.
+- **Items** are every asset of every plugin and the built-in ones, each known by its
+  `AssetId` (name and registered kind, since an ability and a sprite may share a name). The
+  sidebar lists their kinds in groups (`browser::KIND_GROUPS`: World, Characters, Interface,
+  Game, Sound; a group opens to its kinds) and their sources (games, then a game's plugins),
+  only those that have assets, with counts. Items show as thumbnails or as a list (name,
+  kind, plugin, game); kinds that are not pictures are drawn with their symbol.
+- **Search** words match names, plugins, games and kinds, and all must match; `kind:`,
+  `plugin:`, `game:` and `is:placeable` / `is:ready` / `is:missing` narrow it.
+- **Selection:** a click selects an item for the Inspector, Ctrl+click adds one (or takes it
+  out), and dragging a selected item into the viewport places every selected placeable item,
+  side by side. The remote control's `BrowserView(list, "search")` sets the view.
 - **Appear by themselves:** plugin folders are checked every 2 s (file names and modification
   times); new, changed or removed plugins update the browser without Rescan. The selected and
   loaded plugin are kept across rescans. Only plugins that changed, and those using them, are

@@ -112,8 +112,8 @@ pub struct Workshop {
     pub gizmo_busy: bool,
     /// The node just placed; the adjust-after-drop panel edits it until something else happens.
     pub adjusting: Option<NodeId>,
-    /// Set by the UI; the scene system places the item.
-    pub place_request: Option<PlaceRequest>,
+    /// Set by the UI; the scene system places the items.
+    pub place_requests: Vec<PlaceRequest>,
     /// Whether the pointer is over the 3D viewport (and not over a panel or popup).
     pub viewport_hovered: bool,
     /// Whether surface overlays are drawn.
@@ -245,7 +245,7 @@ impl Default for Workshop {
             snap: false,
             gizmo_busy: false,
             adjusting: None,
-            place_request: None,
+            place_requests: Vec::new(),
             viewport_hovered: false,
             show_surfaces: true,
             hovered_cell: None,
@@ -342,7 +342,7 @@ impl Workshop {
 
     /// Asks the scene system to place a plugin output.
     pub fn place(&mut self, plugin: &str, output: &str, parent: NodeId, at_cursor: bool) {
-        self.place_request = Some(PlaceRequest {
+        self.place_requests.push(PlaceRequest {
             item: ItemRef {
                 plugin: plugin.to_string(),
                 output: output.to_string(),

@@ -106,6 +106,8 @@ pub enum Command {
     Act(Option<u8>),
     /// Selects an asset in the content browser, `"plugin/output"`, so the Inspector shows it.
     Browse(String),
+    /// Shows the content browser as a list or as thumbnails, with this search typed in.
+    BrowserView(bool, String),
     /// Gives a node a camera asset to use when played (`None`: its character's own).
     NodeCamera(String, Option<String>),
     /// Gives a node another asset for a setting ("Camera", "HUD", "UI", "Input", "Stats",
@@ -333,6 +335,11 @@ fn run(
         Command::Browse(at) => {
             state.screen = Screen::Workshop;
             crate::asset_ui::select(state, browser, asset(at)?);
+        }
+        Command::BrowserView(list, search) => {
+            state.screen = Screen::Workshop;
+            browser.list = *list;
+            browser.search = search.clone();
         }
         Command::LinkBehavior(node, at) => {
             let id = find(state, node)?;

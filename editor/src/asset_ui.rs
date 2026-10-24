@@ -189,9 +189,13 @@ fn uses_tree(
 pub fn select(state: &mut EditorState, browser: &mut Browser, at: OutputRef) {
     state.workshop.selected = state.workshop.plugin_index(&at.plugin);
     state.workshop.selected_node = None;
-    browser.selected = AssetIndex::build(&state.workshop.plugins)
+    let id = AssetIndex::build(&state.workshop.plugins)
         .get(&at)
         .map(|a| a.id());
+    match id {
+        Some(id) => browser.select(id),
+        None => browser.selected = None,
+    }
 }
 
 /// A node's or the game's setting that names one asset of a kind.
