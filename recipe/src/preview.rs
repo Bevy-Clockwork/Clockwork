@@ -158,6 +158,11 @@ pub fn layered(image: &RgbaImage, layers: &Layers) -> RgbaImage {
     for which in layers.draw_order() {
         let Some(i) = which else {
             out.overlay(&first(image, &layers.frames), 0, 0);
+            for patch in &layers.patches {
+                if let Some(shown) = patch.frames.images.first() {
+                    out.overlay(shown, patch.at.0, patch.at.1);
+                }
+            }
             continue;
         };
         let layer = &layers.layers[i];
@@ -1108,9 +1113,19 @@ mod tests {
                 layer(filled(1, 1, green), 0, false, true),
                 layer(filled(2, 2, blue), -1, true, false),
             ],
+            // A patch's first frame over the area's image, at its place.
+            patches: vec![clockwork_core::layer::Patch {
+                at: (1, 1),
+                frames: Frames {
+                    images: vec![filled(1, 1, green), filled(1, 1, blue)],
+                    ticks: vec![1],
+                    fps: 60.0,
+                },
+            }],
         };
         let shown = layered(&RgbaImage::new(4, 2), &layers);
-        assert_eq!(shown.get(1, 1), red);
+        assert_eq!(shown.get(0, 1), red);
+        assert_eq!(shown.get(1, 1), green);
         // The sky shows through, repeated across the area.
         assert_eq!(shown.get(3, 0), blue);
         // The foreground goes over everything.

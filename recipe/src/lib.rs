@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use clockwork_core::asset::{self, AssetSource};
 use clockwork_core::image::RgbaImage;
-use clockwork_core::layer::{Frames, FramesSpec, Layer, Layers};
+use clockwork_core::layer::{Frames, FramesSpec, Layer, Layers, Patch, PatchSpec};
 use clockwork_core::manifest::{ManifestError, PluginManifest};
 use clockwork_core::model::Model;
 use clockwork_core::place::{self, Placement, SceneTemplate};
@@ -981,8 +981,11 @@ fn run_step(step: usize, s: &Step, rom: &[u8], made: &mut Made) -> Result<(), Re
 fn area_layers(
     id: &str,
     image: &RgbaImage,
-    specs: &[clockwork_core::layer::LayerSpec],
-    frames: Option<&FramesSpec>,
+    (specs, frames, patches): (
+        &[clockwork_core::layer::LayerSpec],
+        Option<&FramesSpec>,
+        &[PatchSpec],
+    ),
     images: &HashMap<String, RgbaImage>,
 ) -> Result<Layers, RecipeError> {
     let fail = |message: String| RecipeError::Part {
@@ -1035,9 +1038,32 @@ fn area_layers(
             frames,
         });
     }
+    // A patch's frames are all the size of its first, and lie inside the area's image.
+    let mut built = Vec::new();
+    for spec in patches {
+        if let Some(problem) = spec.problem() {
+            return Err(fail(problem));
+        }
+        let first = get(&spec.frames.images[0])?;
+        let (w, h) = (first.width, first.height);
+        let (x, y) = spec.at;
+        if u64::from(x) + u64::from(w) > u64::from(image.width)
+            || u64::from(y) + u64::from(h) > u64::from(image.height)
+        {
+            return Err(fail(format!(
+                "the patch at ({x}, {y}) is {w}×{h}, past the edge of the {}×{} image",
+                image.width, image.height
+            )));
+        }
+        built.push(Patch {
+            at: spec.at,
+            frames: frames_of(&spec.frames, first)?,
+        });
+    }
     Ok(Layers {
         frames: frames.map(|f| frames_of(f, image)).transpose()?,
         layers,
+        patches: built,
     })
 }
 
@@ -1072,14 +1098,16 @@ fn outputs(
                 from,
                 layers,
                 frames,
+                patches,
                 ..
             } => {
                 let image = images
                     .get(from.as_str())
                     .cloned()
                     .ok_or_else(|| RecipeError::UnknownOutput(from.clone()))?;
-                if !layers.is_empty() || frames.is_some() {
-                    let built = area_layers(id, &image, layers, frames.as_ref(), images)?;
+                if !layers.is_empty() || frames.is_some() || !patches.is_empty() {
+                    let specs = (layers.as_slice(), frames.as_ref(), patches.as_slice());
+                    let built = area_layers(id, &image, specs, images)?;
                     extracted.layers.push((id.clone(), built));
                 }
                 extracted.images.push((id.clone(), image));
@@ -2331,6 +2359,43 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(run(&recipe, &[]), Err(RecipeError::Part { .. })));
+    }
+
+    #[test]
+    fn an_area_gets_patches_that_animate_on_their_own() {
+        let recipe = |at: &str, second: u32| -> Recipe {
+            ron::from_str(&format!(
+                r#"Recipe(
+                    steps: [
+                        Canvas(name: "map", width: 64, height: 32),
+                        Canvas(name: "water1", width: 16, height: 8),
+                        Canvas(name: "water2", width: 16, height: {second}),
+                    ],
+                    outputs: [
+                        Image(id: "area", from: "map", kind: Some(Area),
+                              patches: [(at: {at}, frames: (images: ["water1", "water2"],
+                                                           ticks: [12], fps: 60.0))]),
+                    ],
+                )"#
+            ))
+            .unwrap()
+        };
+        let extracted = run(&recipe("(48, 24)", 8), &[]).unwrap();
+        let layers = extracted.layers("area").unwrap();
+        assert!(layers.frames.is_none() && layers.layers.is_empty());
+        assert_eq!(layers.patches.len(), 1);
+        assert_eq!(layers.patches[0].at, (48, 24));
+        assert_eq!(layers.patches[0].size(), (16, 8));
+        assert_eq!(layers.patches[0].frames.images.len(), 2);
+        // Its frames are all one size, and it lies inside the image.
+        let Err(RecipeError::Part { message, .. }) = run(&recipe("(48, 24)", 9), &[]) else {
+            panic!("patch frames of different sizes were taken");
+        };
+        assert!(message.contains("\"water2\" is 16×9"), "{message}");
+        let Err(RecipeError::Part { message, .. }) = run(&recipe("(49, 24)", 8), &[]) else {
+            panic!("a patch past the image's edge was taken");
+        };
+        assert!(message.contains("past the edge"), "{message}");
     }
 
     #[test]

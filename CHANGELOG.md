@@ -4,6 +4,9 @@
 
 ### Added
 
+- `patches` on area `Image` outputs: parts of an area that animate on their own, each frames
+  the size of that part drawn at its place over the area with its own timing, so a big map
+  with some water doesn't need a whole copy of the map per frame.
 - `recipe_file` on the agent's `run_recipe`, `save_plugin` and `play_test` tools: a recipe
   read from a file instead of sent in place, for recipes too large to send (a whole game world
   generated from its tables).

@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::character::CharacterSpec;
 use crate::character2d::Character2dSpec;
 use crate::item::ItemDef;
-use crate::layer::{FramesSpec, LayerSpec};
+use crate::layer::{FramesSpec, LayerSpec, PatchSpec};
 use crate::model::Blend;
 pub use crate::place::{Extent, Match, PlaceDoor, PlaceItem, Template};
 use crate::surface::{SurfaceExtension, SurfaceProperty};
@@ -825,8 +825,8 @@ pub enum Codec {
 pub enum Output {
     /// An image the plugin provides, under a stable `id`. `kind` sorts it in the Editor's
     /// content browser; without one it is listed under Other. An area can have `layers` drawn
-    /// with it (backgrounds, foregrounds) and `frames` it cycles through (animated tiles), see
-    /// [`crate::layer`].
+    /// with it (backgrounds, foregrounds), `frames` it cycles through (animated tiles) and
+    /// `patches` of it that animate on their own, see [`crate::layer`].
     Image {
         id: String,
         from: String,
@@ -836,6 +836,8 @@ pub enum Output {
         layers: Vec<LayerSpec>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         frames: Option<FramesSpec>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        patches: Vec<PatchSpec>,
     },
     /// A surface map: `width` cells wide, each `cell_size` native units, built from one or more
     /// grids of codes. Game-specific surfaces are declared in `extensions`.
@@ -1478,10 +1480,15 @@ impl Output {
                 from,
                 layers,
                 frames,
+                patches,
                 ..
             } => {
                 let mut ports = vec![port("from", from, Image, Read)];
                 ports.extend(frame_ports(Vec::new(), frames.as_ref()));
+                for (i, patch) in patches.iter().enumerate() {
+                    let at = vec![Seg::Field("patches"), Seg::Index(i)];
+                    ports.extend(frame_ports(at, Some(&patch.frames)));
+                }
                 for (i, layer) in layers.iter().enumerate() {
                     let at = vec![Seg::Field("layers"), Seg::Index(i)];
                     ports.push(Port {

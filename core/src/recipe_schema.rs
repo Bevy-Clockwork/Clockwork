@@ -516,6 +516,11 @@ pub const OUTPUTS: &[VariantInfo] = &[
                 Optional(&STRUCTURE),
                 "Images it cycles through (animated tiles): (images, ticks, fps)",
             ),
+            d(
+                "patches",
+                Structure,
+                "Parts that animate on their own: [(at: (x, y), frames: (images, ticks, fps)), …]",
+            ),
         ],
     },
     VariantInfo {
