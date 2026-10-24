@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 
 use clockwork_core::asset::{self, AssetSource};
 use clockwork_core::image::RgbaImage;
+use clockwork_core::layer::{Frames, FramesSpec, Layer, Layers};
 use clockwork_core::manifest::{ManifestError, PluginManifest};
 use clockwork_core::model::Model;
 use clockwork_core::place::{self, Placement, SceneTemplate};
@@ -138,12 +139,38 @@ pub struct Extracted {
     pub fonts: Vec<(String, clockwork_core::font::BitmapFont)>,
     /// Output sounds by id.
     pub sounds: Vec<(String, clockwork_core::sound::Pcm)>,
+    /// Output music by id, rendered when it is played.
+    pub music: Vec<(String, Song)>,
     /// Output dialogs whose pages come from extracted text, by id.
     pub dialogs: Vec<(String, clockwork_core::ui::Dialog)>,
     /// Output scenes by id: nodes to add to the Workshop's scene.
     pub scenes: Vec<(String, SceneTemplate)>,
     /// The image each surface map says it covers: (surface map id, image id).
     pub surface_images: Vec<(String, String)>,
+    /// The layers and animated tiles of output images that have them, by image id.
+    pub layers: Vec<(String, Layers)>,
+}
+
+/// An m4a song in a ROM, read and checked but not yet rendered: rendering takes a while, and
+/// a game plays few of its songs at a time.
+#[derive(Clone)]
+pub struct Song {
+    pub rom: std::sync::Arc<[u8]>,
+    pub at: usize,
+    pub rate: u32,
+    pub seconds: Option<f32>,
+}
+
+impl std::fmt::Debug for Song {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Song(0x{:X}, {} Hz)", self.at, self.rate)
+    }
+}
+
+impl Song {
+    pub fn render(&self) -> Result<clockwork_core::sound::Music, String> {
+        clockwork_gba::m4a::render(&self.rom, self.at, self.rate, self.seconds)
+    }
 }
 
 /// Text from `bytes` starting at `at` up to the `end` byte (or `length` bytes): each byte the
@@ -206,13 +233,48 @@ pub struct ExtractedSprite {
     pub character: Option<clockwork_core::character2d::Character2d>,
 }
 
+/// How many pixels of an image output make a meter where it lies on the ground as an area:
+/// one 16-pixel tile is one meter.
+pub const IMAGE_PIXELS_PER_METER: f32 = 16.0;
+
 impl Extracted {
+    /// The surface map covering an output image exactly, if there is one: the one that names
+    /// the image, else (for maps that name none) one of the same size.
+    pub fn surfaces_for(&self, output: &str) -> Option<&SurfaceMap> {
+        let (_, image) = self.images.iter().find(|(id, _)| id == output)?;
+        let named = |id: &str| {
+            self.surface_images
+                .iter()
+                .find(|(surface, _)| surface == id)
+                .map(|(_, image)| image.as_str())
+        };
+        if let Some((_, map)) = self
+            .surfaces
+            .iter()
+            .find(|(id, _)| named(id) == Some(output))
+        {
+            return Some(map);
+        }
+        self.surfaces
+            .iter()
+            .filter(|(id, _)| named(id).is_none())
+            .map(|(_, map)| map)
+            .find(|m| {
+                m.width * m.cell_size == image.width && m.height * m.cell_size == image.height
+            })
+    }
+
     pub fn sprite(&self, id: &str) -> Option<&ExtractedSprite> {
         self.sprites.iter().find(|s| s.id == id)
     }
 
     pub fn model(&self, id: &str) -> Option<&ExtractedModel> {
         self.models.iter().find(|m| m.id == id)
+    }
+
+    /// The layers and animated tiles of an output image, if it has any.
+    pub fn layers(&self, id: &str) -> Option<&Layers> {
+        self.layers.iter().find(|(i, _)| i == id).map(|(_, l)| l)
     }
 
     /// The picture of an item icon, cropped to what it shows.
@@ -356,7 +418,7 @@ pub fn run_from(
         run_step(step, s, rom, &mut made)?;
         observe(step, &made);
     }
-    outputs(recipe, &made, assets)
+    outputs(recipe, rom, &made, assets)
 }
 
 /// Runs one step on what was made before it.
@@ -879,9 +941,75 @@ fn run_step(step: usize, s: &Step, rom: &[u8], made: &mut Made) -> Result<(), Re
     Ok(())
 }
 
+/// An area image's layers and frames, from the images the steps made. Frames must be the size
+/// of the image they replace.
+fn area_layers(
+    id: &str,
+    image: &RgbaImage,
+    specs: &[clockwork_core::layer::LayerSpec],
+    frames: Option<&FramesSpec>,
+    images: &HashMap<String, RgbaImage>,
+) -> Result<Layers, RecipeError> {
+    let fail = |message: String| RecipeError::Part {
+        id: id.to_string(),
+        message,
+    };
+    let get = |name: &str| {
+        images
+            .get(name)
+            .ok_or_else(|| fail(format!("unknown image \"{name}\"")))
+    };
+    let frames_of = |spec: &FramesSpec, of: &RgbaImage| {
+        if let Some(problem) = spec.problem() {
+            return Err(fail(problem));
+        }
+        let mut list = Vec::new();
+        for name in &spec.images {
+            let frame = get(name)?;
+            if (frame.width, frame.height) != (of.width, of.height) {
+                return Err(fail(format!(
+                    "frame \"{name}\" is {}×{}, not {}×{} like the image it replaces",
+                    frame.width, frame.height, of.width, of.height
+                )));
+            }
+            list.push(frame.clone());
+        }
+        Ok(Frames {
+            images: list,
+            ticks: spec.ticks.clone(),
+            fps: spec.fps,
+        })
+    };
+    let mut layers = Vec::new();
+    for spec in specs {
+        if let Some(problem) = spec.problem() {
+            return Err(fail(problem));
+        }
+        let image = get(&spec.from)?.clone();
+        let frames = spec
+            .frames
+            .as_ref()
+            .map(|f| frames_of(f, &image))
+            .transpose()?;
+        layers.push(Layer {
+            image,
+            order: spec.order,
+            scroll: spec.scroll,
+            wrap: spec.wrap,
+            over_sprites: spec.over_sprites,
+            frames,
+        });
+    }
+    Ok(Layers {
+        frames: frames.map(|f| frames_of(f, image)).transpose()?,
+        layers,
+    })
+}
+
 /// What a recipe's outputs are, from what its steps made.
 fn outputs(
     recipe: &Recipe,
+    rom: &[u8],
     made: &Made,
     assets: &dyn AssetSource,
 ) -> Result<Extracted, RecipeError> {
@@ -901,13 +1029,24 @@ fn outputs(
         ..
     } = made;
     let mut extracted = Extracted::default();
+    let mut shared_rom: Option<std::sync::Arc<[u8]>> = None;
     for output in &recipe.outputs {
         match output {
-            Output::Image { id, from, .. } => {
+            Output::Image {
+                id,
+                from,
+                layers,
+                frames,
+                ..
+            } => {
                 let image = images
                     .get(from.as_str())
                     .cloned()
                     .ok_or_else(|| RecipeError::UnknownOutput(from.clone()))?;
+                if !layers.is_empty() || frames.is_some() {
+                    let built = area_layers(id, &image, layers, frames.as_ref(), images)?;
+                    extracted.layers.push((id.clone(), built));
+                }
                 extracted.images.push((id.clone(), image));
             }
             Output::Surfaces {
@@ -1077,6 +1216,29 @@ fn outputs(
                 extracted.sounds.push((
                     id.clone(),
                     clockwork_core::sound::Pcm::decode(bytes, *format, *rate),
+                ));
+            }
+            Output::Music {
+                id,
+                song,
+                rate,
+                seconds,
+            } => {
+                clockwork_gba::m4a::Header::read(rom, *song as usize).map_err(|message| {
+                    RecipeError::Part {
+                        id: id.clone(),
+                        message,
+                    }
+                })?;
+                let rom = shared_rom.get_or_insert_with(|| rom.into()).clone();
+                extracted.music.push((
+                    id.clone(),
+                    Song {
+                        rom,
+                        at: *song as usize,
+                        rate: *rate,
+                        seconds: *seconds,
+                    },
                 ));
             }
             Output::Scene {
@@ -2101,6 +2263,43 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(run(&recipe, &[]), Err(RecipeError::Part { .. })));
+    }
+
+    #[test]
+    fn an_area_gets_its_layers_and_frames() {
+        let recipe = |frame_size: u32| -> Recipe {
+            ron::from_str(&format!(
+                r#"Recipe(
+                    steps: [
+                        Canvas(name: "map", width: 4, height: 2),
+                        Canvas(name: "water", width: 4, height: {frame_size}),
+                        Canvas(name: "sky", width: 2, height: 2),
+                        Canvas(name: "roofs", width: 4, height: 2),
+                    ],
+                    outputs: [
+                        Image(id: "area", from: "map", kind: Some(Area),
+                              frames: Some((images: ["map", "water"], ticks: [10], fps: 60.0)),
+                              layers: [(from: "sky", order: -1, scroll: (0.5, 0.5), wrap: true),
+                                       (from: "roofs", over_sprites: true)]),
+                        Image(id: "plain", from: "map"),
+                    ],
+                )"#
+            ))
+            .unwrap()
+        };
+        let extracted = run(&recipe(2), &[]).unwrap();
+        let layers = extracted.layers("area").unwrap();
+        assert_eq!(layers.frames.as_ref().unwrap().images.len(), 2);
+        assert_eq!(layers.layers.len(), 2);
+        assert_eq!(layers.layers[0].image.width, 2);
+        assert!(layers.layers[0].wrap && layers.layers[1].over_sprites);
+        assert_eq!(layers.draw_order(), vec![Some(0), None, Some(1)]);
+        assert!(extracted.layers("plain").is_none());
+        // A frame must be the size of the image it replaces.
+        let Err(RecipeError::Part { message, .. }) = run(&recipe(3), &[]) else {
+            panic!("a frame of the wrong size was taken");
+        };
+        assert!(message.contains("\"water\" is 4×3"), "{message}");
     }
 }
 

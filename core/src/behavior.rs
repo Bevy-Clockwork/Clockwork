@@ -68,12 +68,16 @@ pub enum Effect {
     Say(Slot<crate::ui::Dialog>),
     /// Plays a sound asset, `"plugin/output"`.
     Sound(String),
+    /// Plays a music asset, `"plugin/output"`, in place of the music playing; `""` stops it.
+    Music(String),
     /// Raises a flag (see [`Condition::Flag`]); it stays up until play stops or it's cleared.
     Set(String),
     /// Lowers a flag.
     Clear(String),
     /// Does each of these, in order.
     All(Vec<Effect>),
+    /// Starts a script: commands run one after another over time (see [`crate::script`]).
+    Run(Box<crate::script::Script>),
 }
 
 /// Something true or not while playing: what the player carries, flags effects raise, nodes

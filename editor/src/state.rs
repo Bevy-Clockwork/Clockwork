@@ -156,6 +156,9 @@ pub struct Workshop {
     pub sounds: Vec<clockwork_core::asset::OutputRef>,
     /// The played character's sounds.
     pub kit_sounds: KitSounds,
+    /// Music to play in place of what plays (none: silence), as soon as the music system
+    /// gets to it.
+    pub music: Option<Option<clockwork_core::asset::OutputRef>>,
     /// Set by the remote control: open or close the menu of this kind.
     pub menu_toggle: Option<String>,
     /// Set by the remote control: game buttons to press, by name.
@@ -270,6 +273,7 @@ impl Default for Workshop {
             dialog: None,
             sounds: Vec::new(),
             kit_sounds: KitSounds::default(),
+            music: None,
             menu_toggle: None,
             presses: Vec::new(),
             asset_editor: Default::default(),

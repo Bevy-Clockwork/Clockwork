@@ -487,7 +487,7 @@ pub const STEPS: &[VariantInfo] = &[
 pub const OUTPUTS: &[VariantInfo] = &[
     VariantInfo {
         name: "Image",
-        about: "An image the plugin provides.",
+        about: "An image the plugin provides; an area can have layers and animated tiles.",
         fields: &[
             f("id", Text, "Its id in the plugin"),
             f("from", Name, "The image"),
@@ -495,6 +495,16 @@ pub const OUTPUTS: &[VariantInfo] = &[
                 "kind",
                 Optional(&KIND),
                 "Where the content browser lists it",
+            ),
+            d(
+                "layers",
+                Structure,
+                "Images drawn with it: [(from, order, scroll, wrap, over_sprites, frames), …]",
+            ),
+            d(
+                "frames",
+                Optional(&STRUCTURE),
+                "Images it cycles through (animated tiles): (images, ticks, fps)",
             ),
         ],
     },
@@ -761,6 +771,16 @@ pub const OUTPUTS: &[VariantInfo] = &[
                 Choice(&["S8", "U8", "S16"]),
                 "How the samples are stored",
             ),
+        ],
+    },
+    VariantInfo {
+        name: "Music",
+        about: "Music: an m4a song (most GBA games' music engine), rendered and looped where it loops.",
+        fields: &[
+            f("id", Text, "Its id in the plugin"),
+            f("song", Offset, "Where the song's header is in the ROM"),
+            d("rate", Count, "Samples per second (22050)"),
+            d("seconds", Number, "At most this long: Some(90.0)"),
         ],
     },
     VariantInfo {

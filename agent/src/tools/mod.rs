@@ -3,5 +3,6 @@
 
 pub mod decomp;
 pub mod knowledge;
+pub mod playtest;
 pub mod recipe;
 pub mod rom;

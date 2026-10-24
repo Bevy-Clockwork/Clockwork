@@ -501,7 +501,7 @@ pub struct GameSetting {
     pub set: fn(&mut Game, Option<OutputRef>),
 }
 
-pub const GAME_PICKS: [GameSetting; 9] = [
+pub const GAME_PICKS: [GameSetting; 10] = [
     GameSetting {
         label: "Preset",
         kind: "Game",
@@ -556,6 +556,12 @@ pub const GAME_PICKS: [GameSetting; 9] = [
         get: |g| g.inventory.clone(),
         set: |g, v| g.inventory = v,
     },
+    GameSetting {
+        label: "Music",
+        kind: "Music",
+        get: |g| g.music.clone(),
+        set: |g, v| g.music = v,
+    },
 ];
 
 /// The game's own settings, shown with the scene's root.
@@ -570,6 +576,7 @@ pub fn game_settings(ui: &mut egui::Ui, state: &mut EditorState) {
                 "Preset" => "None",
                 "Flow" => "Preset or none",
                 "Rules" => "Built-in",
+                "Music" => "None",
                 _ => "Characters' own",
             };
             if let Some(choice) = asset_picker(

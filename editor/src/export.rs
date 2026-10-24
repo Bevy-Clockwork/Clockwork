@@ -84,13 +84,18 @@ pub fn games(plugins: &[RequiredPlugin]) -> Vec<String> {
 }
 
 /// Names of the plugins whose items the scene shows, in the order they first appear.
-/// The assets an effect names: dialogs and sounds, also inside `All`.
+/// The assets an effect names: dialogs, sounds and music, also inside `All`.
 fn effect_assets(effect: &Effect, wanted: &mut Vec<OutputRef>) {
     match effect {
         Effect::Say(dialog) => wanted.extend(dialog.target().cloned()),
-        Effect::Sound(name) => wanted.extend(OutputRef::parse(name)),
+        Effect::Sound(name) | Effect::Music(name) => wanted.extend(OutputRef::parse(name)),
         Effect::All(effects) => {
             for effect in effects {
+                effect_assets(effect, wanted);
+            }
+        }
+        Effect::Run(script) => {
+            for effect in script.effects() {
                 effect_assets(effect, wanted);
             }
         }
@@ -144,6 +149,7 @@ pub fn plugins_used(scene: &Scene, assets: &AssetIndex) -> Vec<String> {
             &game.input,
             &game.stats,
             &game.inventory,
+            &game.music,
         ]
         .into_iter()
         .flatten()

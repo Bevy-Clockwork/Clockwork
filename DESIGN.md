@@ -324,6 +324,7 @@ packs and existing plugins.
 | Decomp | `decomp_sync` (shallow `git clone` into `<data>/decomps/`), `decomp_list`, `decomp_search` (regex), `decomp_read` |
 | Knowledge | `recipe_guide`, `list_knowledge`, `read_knowledge`, `list_plugins`, `read_plugin` |
 | Results | `run_recipe` (summary + image previews the agent can see), `save_plugin` (runs the recipe first), `edit_plugin` (changes a saved recipe a step at a time, keeping its comments; runs it first) |
+| Play-testing | `play_test` (plays a Scene output from a script of inputs, headless, and reports what happened) |
 | External programs | `list_external_tools` |
 
 **The Library is shared** with the editor through `library.ron` (`clockwork_library::catalog`):
@@ -511,6 +512,16 @@ WASD or arrows, Shift to walk, Space to jump, Escape or *Stop* to end.
   winning). The editor's `play.rs` only hands it the scene and the extracted content and shows
   the result (rigs, camera, HUD, log), so an exported player or a headless test can drive the
   same game.
+- **Play-tests:** `clockwork_runtime::play::playtest` plays a scene from a script instead of a
+  player: each step holds the stick one way or towards a node (until it is reached) and holds
+  buttons for so many seconds, at the fixed step, so a script always plays the same way. Its
+  `Report` lists what happened and when (with what hurt the player, nodes gone and actors'
+  state changes), how each step ended or where it got stuck, the end (position, health, lives,
+  items, won or game over) and the nodes never reached or still standing. The agent's
+  `play_test` tool sets up a plugin's Scene output as the Workshop places it (its images with
+  surface maps as areas, models with collision as 3D areas, doors and behavior assets), plays a
+  character through it and returns the report, so an agent can check its own plugin. The names
+  check Play runs at the start (`play::check`) is shared with it.
 
 ### 7.7 Sprites and 2D characters (implemented)
 
@@ -698,6 +709,78 @@ functions, timers, distance checks) into states and numbers rather than code.
 
 Not yet: actors that throw projectiles or use actions, actors blocking each other, flying and
 jumping motions, and paths around walls (they walk straight and slide).
+
+### 7.10.2 Music (implemented)
+
+Most GBA games play their music with the **m4a** engine (MusicPlayer2000, "Sappy"), so it is
+read as a platform format (`clockwork_gba::m4a`), not per game.
+
+- **A song** is a header (its voice group and tracks) and tracks of commands: notes and ties,
+  waits, voice, volume, pan, bend, key shift, tempo, patterns, repeats and jumps. Voices play
+  samples (looped or not, fixed or pitched), square, wave and noise channels, and key splits and
+  drum kits that pick another voice by key. Envelopes run at the screen's rate, as the engine's.
+- **Rendering** turns a song into stereo samples and finds its loop: where the first track
+  jumps back to. Play plays the part before it once and then repeats the loop.
+- **Recipes:** `Music(id, song: 0x...)` names a song by its header's offset; the agent's
+  `find_songs` finds the song table (the longest run of entries pointing to valid songs).
+  Extraction only checks the header; a song is rendered on another thread the first time it
+  plays.
+- **Play:** a game's settings name the music playing from the start, and the effect
+  `Music("plugin/output")` changes it (`""` stops it), from a trigger or an actor's state.
+
+Not yet: modulation (vibrato), reverb, compressed samples, and the engine's exact mixing rate
+and volume curve, so songs sound close to the game but not identical.
+
+### 7.10.3 Background layers and animated tiles (implemented)
+
+2D consoles draw an area as several backgrounds: a far one that scrolls slower than the camera,
+the map, and parts drawn over the characters. Tiles that move (water, lava, flowers) are tile
+graphics the game copies into video memory every few frames. Both are data
+(`clockwork_core::layer`), written on the area's `Image` output:
+
+- **Layers:** images the recipe's steps made (one `GbaMetatileMap` per background), each with a
+  draw `order` (the area's own image is 0), a `scroll` factor across and down (1.0 moves with
+  the map, 0.25 far away, 0.0 fixed to the screen), `wrap` (the image repeats across the area,
+  like a hardware background smaller than the map) and `over_sprites` (drawn over characters).
+  Layers line up with the area when the camera is at its top left corner, as scroll registers
+  do. The area's surfaces stay on its own image; layers have no collision.
+- **Animated tiles:** `frames` on the area or on any layer: images shown in turn in place of the
+  still one, each for its ticks at the game's tick rate, looping. A recipe builds one video
+  memory per frame of the game's tile animation table and renders the same map with each, so
+  every place a tile is used animates. Frames must be the size of the image they replace.
+- **Viewport** (`editor/src/layers.rs`): each layer is a plane a little above or below the area
+  in draw order, layers over sprites above the sprites; frames swap textures; while playing,
+  layers move with the camera by what their scroll leaves out (wrapping ones move their
+  texture). The Workshop shows them unscrolled. Clicks go through layers to what is under them.
+- **Checks and previews:** frame timing and scroll are checked when a plugin is saved, a frame
+  of the wrong size fails the extraction, and `run_recipe` lists the layers back to front and
+  previews the area with all of them.
+
+Not yet: layers that scroll on their own (moving clouds, waterfalls by offset), palette
+animation (colors cycling instead of tiles), per-layer blending and window effects, and
+hardware tile animation without rendering each frame's whole map.
+
+### 7.10.4 Scripts (implemented)
+
+What a game does over time rather than at once (cutscenes, a boss's entrance, an NPC walking
+up to talk, a door that opens after a lever and a pause) is a **script**
+(`clockwork_core::script`): commands of plain data, so the agent translates a game's event
+scripts into commands rather than code.
+
+- **Commands:** `Do` (any trigger effect), `Wait`, `Until` (a condition), `Walk` and `Place`
+  (a node or the player to where another stands), `Hold` (the player can't move or act), `If`,
+  `Repeat` and `End`. `hold_player` holds the player until the script ends.
+- **Runtime:** the effect `Run` starts one, from a trigger, an actor's state or another script;
+  several run at once. `clockwork_runtime::play::script` keeps each one's place and runs it at
+  Play's pace (time left over from a wait goes to the next command). Effects go into the frame's
+  outcome like a trigger's; moved nodes take their behaviors along and are reported in
+  `Play::moved`. A script that runs 1000 commands in a frame without waiting is stopped.
+- **Checks:** Repeats that never wait and walks that never arrive are problems, and the nodes a
+  script names are checked like teleports.
+- **Editor:** the Inspector edits a script's commands as RON; Play moves the nodes it walks.
+
+Not yet: camera commands, choices in dialogs, scripts as their own assets, and walking around
+walls (walks are straight lines).
 
 ### 7.11 Abilities and composition plugins (implemented)
 
@@ -925,6 +1008,7 @@ M1 and M2 need no AI on purpose. They build the foundation the agent stands on.
 | 2026-10-21 | Library games can be linked to a decompilation repository; known decomps are suggested by ROM hash from `knowledge/decomps.ron`. The agent (M3) uses the linked decomp as its main source | §6 |
 | 2026-10-21 | Game-specific knowledge lives in plugin data, never in Clockwork code: recipes use generic steps (`Lookup`), and what a game's codes mean is a code → property table in the plugin (`Surfaces` output) | §4.4, §5.1 |
 | 2026-10-23 | Nothing names a game: collision is read by a data-described `CollisionTriangles` step (replacing SM64-only `N64Collision`), known decomps come from content folders, the roll slot is the `dodge` and the boomerang motion `Return` (old names still load) | §4, §5 |
+| 2026-10-24 | Music is the m4a engine's songs rendered by Clockwork, looped where they loop; extraction checks, playing renders | §7.10.2 |
 | 2026-10-24 | Enemies and NPCs are `Actor` behaviors: state machines of data (motions, cues, effects), never per-game code; Play's simulation lives in `clockwork_runtime::play` | §7.6, §7.10.1 |
 | 2026-10-24 | Where a game places things is read from its record tables by a generic `Places` step, never written into a recipe; `MarkPlaces` turns placements into surface cells and a `Scene` output into Workshop nodes. GBA background steps take `depth: Bpp8` for 256-color modes. A `Surfaces` output names the image it covers (`image`), so maps of equal size don't get each other's collision | §5.1, §7.2 |
 

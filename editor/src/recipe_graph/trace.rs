@@ -268,6 +268,13 @@ pub(super) fn summarize_outputs(
                         pcm.rate
                     ));
                 }
+                Output::Music { .. } => {
+                    let (_, song) = extracted.music.iter().find(|(i, _)| i == id)?;
+                    let tracks = song.rom.get(song.at).copied().unwrap_or(0);
+                    result
+                        .lines
+                        .push(format!("a song of {tracks} tracks, played in Play"));
+                }
                 Output::Dialog { dialog, .. } => result.lines.push(match dialog {
                     Slot::Ref(at) => format!("same as {at}"),
                     Slot::Inline(d) => format!("{} pages", d.pages.len()),

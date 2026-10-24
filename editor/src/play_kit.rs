@@ -104,6 +104,7 @@ pub fn game(state: &mut EditorState) -> crate::scene::Game {
     game.input = game.input.or(name(&settings.input));
     game.stats = game.stats.or(name(&settings.stats));
     game.inventory = game.inventory.or(name(&settings.inventory));
+    game.music = game.music.or(name(&settings.music));
     game.menus = game.menus.or_else(|| {
         settings
             .menus

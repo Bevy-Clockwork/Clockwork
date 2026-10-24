@@ -27,6 +27,10 @@ notes so the next extraction is faster (tell the user; you can't write knowledge
 replace, move or remove a step or output, write a step's note) instead of saving the whole \
 recipe again: it keeps the recipe's comments and layout, runs the result and only saves it \
 if it works. Notes (// lines right above a step) are what the user reads in the editor.
+7. A plugin with a Scene output can be played without the user: play_test walks a character \
+through it from a script and reports what happened (see \"Play-testing a scene\" in \
+recipe_guide). Use it to check your own work: the player reaches the goal, doors lead \
+somewhere, enemies hurt and can be beaten, nothing that should be reachable is out of reach.
 
 Tools for external programs (git, Ghidra, …) live in their own folder; list_external_tools \
 shows what is available.";
@@ -245,7 +249,8 @@ MarkPlaces(from: "forest_enemies", width: 64, height: 40, cell_size: 16, origin:
 Image(id: "area", from: "img", kind: Some(Area))
     kind sorts the image in the Editor's content browser: Area, Tileset, Sprite, Character,
     Ability, Object or Audio. Always set it; images without a kind are listed under Other.
-    An Area is a playable map; a Surfaces output covering it gives it collision.
+    An Area is a playable map; a Surfaces output covering it gives it collision. An area can
+    have background layers and animated tiles: see "Background layers and animated tiles".
 Surfaces(
     id: "surfaces", width: 63, cell_size: 16,
     grids: [
@@ -466,7 +471,20 @@ Behavior(id: "octorok", behavior: Actor((
     `Hurt`, `HealthBelow(h)`, `Arrived` (a wander point, home or a patrol's end), `Blocked` (a
     wall or hole stopped it), `Chance(per_second)`, `When(condition)`, `Not`, `All`, `Any`.
     Actors without `health` can't be beaten; beaten actors count for `DestroyAll`. Transitions
-    to states the actor doesn't have are reported when the plugin is saved. A scene node has a
+    to states the actor doesn't have are reported when the plugin is saved.
+
+What happens over time rather than at once (a cutscene, a boss's entrance, an NPC walking up to
+talk, a door that opens a moment after a lever) is a script, started by the effect `Run`:
+`Trigger(radius: 1.0, once: true, effect: Run((hold_player: true, steps: [Walk(node: "Guard",
+to: "player", speed: 2.0), Do(Say((speaker: Some("Guard"), pages: ["Halt!"]))),
+Wait(0.5), Until(Flag("lever")), Do(Set("gate_open"))])))`. Commands: `Do(effect)` (any
+effect, at once; the game waits while a dialog is open), `Wait(seconds)`, `Until(condition)`,
+`Walk(node, to, speed)` (in a straight line to where node `to` stands, `"player"` for the
+player either way; its behaviors go with it), `Place(node, to)` (at once), `Hold(bool)` (the
+player can't move or act), `If(when, then: [...], otherwise: [...])`, `Repeat(times:
+Some(n), steps: [...])` (forever without `times`; it must wait somewhere) and `End`.
+`hold_player` holds the player until the script ends. Translate a game's event scripts (its
+cutscene commands, its timers) into these, not into new code. A scene node has a
 list of behaviors, each working only while its condition holds, and can appear only once one
 does: conditions are `Has(item, count)`, `Flag("name")`, `Gone("node name")` (destroyed or
 picked up), `Act(n)` (the current act is n), `Not(...)`, `All([...])` and `Any([...])`.
@@ -501,7 +519,12 @@ panels with an `Image` (`frame: Some((image: "plugin/image", border: 3))`, nine-
 `Sound(id, from: "buffer", rate: 13379, format: S8 | U8 | S16)` reads samples (GBA games often
 keep plain signed 8-bit PCM); triggers play them with the effect `Sound("plugin/sound")`, and a
 character's kit can name `sounds: Some("plugin/sounds")`, a `Sounds(id, sounds: (hurt, pickup,
-door, menu))` output. `Dialog(id, dialog: (speaker: Some("Sign"), pages: ["...", "..."]))` is
+door, menu))` output. Music: most GBA games play theirs with the m4a engine ("Sappy");
+`find_songs` lists a ROM's song table, and `Music(id, song: 0x...)` names a song by its
+header's offset (rendered with its instruments and looped where the song loops; `seconds:
+Some(90.0)` cuts a song that never ends). A game's settings play one from the start (`music:
+Some("plugin/music")`), and the effect `Music("plugin/music")` changes it (`Music("")` stops
+it): put it in a trigger at an area's door, or a boss actor's state. `Dialog(id, dialog: (speaker: Some("Sign"), pages: ["...", "..."]))` is
 shown by the trigger effect `Say("plugin/dialog")` (or `Say((speaker, pages))` in place).
 A game's own text never goes in a recipe: decode it with a `Text` step and give the dialog
 `from: Some("text"), lines_per_page: Some(4)` instead of pages.
@@ -524,6 +547,35 @@ too, into their own plugin `my-game` to change them there.
 - zoom: {image: "area", x: 400, y: 300, w: 220, h: 160} shows that rectangle enlarged; combine
   it with surfaces to inspect cells closely.
 
+## Play-testing a scene (play_test)
+
+play_test plays a Scene output the way the Workshop's Play mode would, without a window, at
+Play's fixed 1/60 s step: the same script always plays the same way. The scene's images with
+surface maps are its floors (16 px a meter, centered on their node) and its models with
+collision its 3D areas; doors and behavior assets of placements work as in Play.
+
+- `plugin` (saved) or `recipe` (+ `game`, or `plugin` for an edit not saved yet), `scene`
+  (default the first), `character` ("plugin/output" of a sprite or model with `character`:
+  another plugin's Link works in this plugin's rooms), `start` (a node's name or [x, y, z]),
+  `rules` ("plugin/output" or RON, e.g. `(lives: Some(3), goal: Some(Reach("Exit")))`), `act`.
+- `nodes`: behaviors added for this play, to scene nodes by name or to new nodes with `at`:
+  `{"name": "Chest", "behaviors": ["Pickup(item: \"key\", count: 1, radius: 0.5)"]}` or
+  `{"name": "Goal", "at": [12, 0, 4], "behaviors": []}` (a point to reach).
+- `script`: steps, each `{"hold": [dx, dz], "seconds": 2}` ([1, 0] east, [0, 1] south, down the
+  map), `{"toward": "Octorok"}` (straight at a node, an actor where it is now, until reached or
+  `seconds`, default 10), `{"seconds": 1}` (stand still), with `"walk": true` and `"press":
+  ["a"]` (pressed as the step starts and held through it; "jump", "a", "b", "dodge"; a 0.1 s
+  step is a tap). At most 600 s in all.
+
+The report lists events with their time and step (items got, nodes gone, "hurt by
+\"Octorok\"", doors and where they led, actors changing state, sounds, dialogs, problems),
+how each step ended (reached, how close it came, "stuck at" a wall for half a second), the end
+(position, health, lives, items carried, won or game over: play stops there) and the nodes
+never reached (pickups, doors, triggers, checkpoints) and still standing (targets, actors that
+can be beaten), with how close the player came. Content problems come first: names that lead
+nowhere, a start that isn't on a floor, behaviors that don't resolve. A toward step that gets
+stuck usually means a wall in the surface map or a node placed off its room.
+
 ## Graphics that change at runtime
 
 Some areas have more graphics than fit in VRAM and swap tiles while you play: by camera
@@ -531,7 +583,39 @@ position (a large town map), by animation (water, flowers) or by story state. Si
 magenta or garbage tiles in only part of a render, or wrong art in one region. Search the decomp
 for managers that copy graphics (e.g. "TileSetManager", "LoadGfx", region checks). To show the
 area as players see it, build one VRAM per state (Place), render each, and draw each state only
-in its region with Overlay(region, replace: true).
+in its region with Overlay(region, replace: true). Tiles swapped by animation are `frames`
+(next section), not a still image.
+
+## Background layers and animated tiles
+
+GBA areas are drawn as up to four backgrounds (BG0-BG3): the map, a far layer that scrolls
+slower (sky, clouds, a distant forest) and parts drawn over the characters (treetops, roofs,
+bridges). Render each background with GbaMetatileMap into its own image and list them on the
+area's Image output:
+
+Image(id: "forest", from: "bg2", kind: Some(Area),
+      frames: Some((images: ["bg2", "bg2_water_1", "bg2_water_2"], ticks: [12], fps: 59.7275)),
+      layers: [
+          (from: "bg3", order: -1, scroll: (0.25, 0.25), wrap: true),
+          (from: "bg1", order: 1, over_sprites: true),
+      ])
+    `from` is the area itself (the layer its Surfaces cover, order 0). Each layer: `order`
+    (higher draws over lower; equal orders draw after the area, as listed), `scroll` (how far it
+    moves per meter the camera moves, across and down: 1.0 like the map, 0.25 far away, 0.0
+    fixed to the screen; read it from the code that sets the background's scroll registers: a
+    background scrolled by the camera position shifted right by 2 has 0.25), `wrap` (repeats the image across the area, like a hardware
+    background that is smaller than the map) and `over_sprites` (drawn over characters: the
+    hardware priority of that background is above the sprites'). Layers line up with the area
+    when the camera is at its top left corner. Play mode scrolls them; the Workshop shows them
+    unscrolled. Transparent pixels show what is behind.
+    `frames` (on the area or on any layer) are images shown in turn in place of the still one,
+    each for its `ticks` (one number per image, or one for all) at `fps` ticks a second, looping:
+    water, lava, flowers. Games animate tiles by copying new tile graphics into VRAM every few
+    frames from a list of sources (search the decomp for the tile animation table or the code
+    that copies to VRAM on a timer). Build one VRAM per frame (Place each frame's tiles where the
+    game copies them), render the same map with each, and list the renders. Every frame must be
+    the size of the image it replaces. run_recipe lists the layers back to front and previews
+    the area with all of them.
 
 ## Habits that work
 

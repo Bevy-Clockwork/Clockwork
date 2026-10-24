@@ -185,8 +185,10 @@ pub fn play_system(
             // the whole window.
             flow.begin(&mut state);
             state.workshop.game_view = flow.is_game();
+            state.workshop.music = Some(crate::play_kit::game(&mut state).music);
         }
         Some(false) => {
+            state.workshop.music = Some(None);
             // Actors go back to their own animations, and their nodes to where they stand.
             for mut rig in &mut rigs {
                 if state.workshop.acting.contains(&rig.node) {
@@ -427,6 +429,14 @@ pub fn play_system(
                     session.waiting_dialog = Some(at);
                 }
             }
+            Happened::Music(name) if name.is_empty() => state.workshop.music = Some(None),
+            Happened::Music(name) => match asset::OutputRef::parse(&name) {
+                Some(at) => state.workshop.music = Some(Some(at)),
+                None => state.log(
+                    LogLevel::Warn,
+                    format!("\"{name}\" is not \"plugin/output\""),
+                ),
+            },
             Happened::Sound(name) => match asset::OutputRef::parse(&name) {
                 Some(at) => state.workshop.sounds.push(at),
                 None => state.log(
@@ -463,8 +473,29 @@ pub fn play_system(
     state.workshop.hud = fights.then(|| played.fighter.hud());
     state.workshop.health = Some((played.vitals.health, played.vitals.max));
 
-    // Actors where they went, showing their state's animation.
+    // Nodes scripts moved, where they are now.
     state.workshop.acting.clear();
+    for (&node, &at) in &played.moved {
+        if node == played.node {
+            continue;
+        }
+        state.workshop.acting.insert(node);
+        if let Some(entity) = view.entity(node)
+            && let Ok(mut transform) = transforms.get_mut(entity)
+        {
+            let parent = state
+                .workshop
+                .scene
+                .get(node)
+                .and_then(|n| n.parent)
+                .and_then(|p| view.entity(p))
+                .and_then(|e| parents.get(e).ok())
+                .map(|g| g.affine())
+                .unwrap_or_default();
+            transform.translation = parent.inverse().transform_point3(at);
+        }
+    }
+    // Actors where they went, showing their state's animation.
     for pose in played.entities.poses() {
         if pose.node == played.node {
             continue;

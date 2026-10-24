@@ -4,6 +4,14 @@
 
 ### Added
 
+- Scripts: the effect `Run` starts commands that run over time (`Do`, `Wait`, `Until`, `Walk`,
+  `Place`, `Hold`, `If`, `Repeat`, `End`), for cutscenes and events. A script can hold the
+  player still, and nodes it walks take their behaviors along. The Inspector edits scripts, and
+  content checks report scripts that never wait or name nodes that don't exist.
+- `Music` recipe output: an m4a song (the music engine most GBA games use), rendered with its
+  instruments and looped where it loops. Games play music from the start (the `music` game
+  setting) and change it with the `Music` effect. The agent's `find_songs` tool finds a ROM's
+  song table.
 - `Places` recipe step: reads where a game places things (rooms, doors, enemies, objects) from
   its own tables of records, with filters, an end marker, names and groups made from record
   fields, the output each shows, door targets and how far each reaches.
@@ -24,6 +32,17 @@
 - `clockwork_runtime::play`: Play's simulation (the played character, its actions and items,
   the scene's behaviors, rules and goals) runs without a window, so it can be tested headless.
   The editor's Play mode drives it.
+- `layers` on area `Image` outputs: background and foreground layers with a draw order, a
+  scroll factor (parallax) and wrapping, and layers drawn over sprites. Play scrolls them with
+  the camera.
+- `frames` on area images and their layers: animated tiles (water, lava, flowers) as images
+  shown in turn, each for its ticks. The Workshop and Play animate them; `run_recipe` previews
+  an area with all its layers.
+- `play_test` agent tool: plays a plugin's Scene output without a window from a script of
+  inputs (hold a direction or walk toward a node, press buttons, for so many seconds) and
+  reports what happened and when, how each step ended or got stuck, the end (health, lives,
+  items, won or game over) and what was never reached. Behaviors and nodes can be added for
+  the test. The same script always plays the same way.
 
 ### Fixed
 

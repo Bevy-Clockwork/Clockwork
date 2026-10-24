@@ -15,6 +15,7 @@ use bevy::{
 
 use crate::{
     ViewportCamera,
+    layers::LayerPlane,
     scene::{NodeId, ROOT, Scene},
     state::EditorState,
     terrains::SceneTerrains,
@@ -169,6 +170,7 @@ pub fn manipulate_system(
     camera: Single<(&Camera, &GlobalTransform), With<ViewportCamera>>,
     mut ray_cast: MeshRayCast,
     nodes: Query<&SceneNode>,
+    layer_planes: Query<(), With<LayerPlane>>,
     parents: Query<&ChildOf>,
     mut gizmos: Gizmos,
 ) {
@@ -255,7 +257,14 @@ pub fn manipulate_system(
     if let Some(at) = state.workshop.pick_request.take()
         && let Ok(ray) = camera.viewport_to_world(camera_transform, at)
     {
-        pick(&mut state, &mut ray_cast, &nodes, &parents, ray, false);
+        pick(
+            &mut state,
+            &mut ray_cast,
+            (&nodes, &layer_planes),
+            &parents,
+            ray,
+            false,
+        );
     }
 
     // Press, drag, release.
@@ -283,7 +292,14 @@ pub fn manipulate_system(
                 KeyCode::ShiftLeft,
                 KeyCode::ShiftRight,
             ]);
-            pick(&mut state, &mut ray_cast, &nodes, &parents, ray, additive);
+            pick(
+                &mut state,
+                &mut ray_cast,
+                (&nodes, &layer_planes),
+                &parents,
+                ray,
+                additive,
+            );
         }
     }
     if !buttons.pressed(MouseButton::Left) {
@@ -478,17 +494,18 @@ fn apply_drag(
     scene.dirty = true;
 }
 
-/// Selects the node under the cursor, or nothing when the click lands on empty space.
+/// Selects the node under the cursor, or nothing when the click lands on empty space. Clicks go
+/// through an area's layers (a foreground over a character picks the character).
 fn pick(
     state: &mut EditorState,
     ray_cast: &mut MeshRayCast,
-    nodes: &Query<&SceneNode>,
+    (nodes, layer_planes): (&Query<&SceneNode>, &Query<(), With<LayerPlane>>),
     parents: &Query<&ChildOf>,
     ray: Ray3d,
     additive: bool,
 ) {
-    let always = |_: Entity| true;
-    let hits = ray_cast.cast_ray(ray, &MeshRayCastSettings::default().with_filter(&always));
+    let solid = |entity: Entity| !layer_planes.contains(entity);
+    let hits = ray_cast.cast_ray(ray, &MeshRayCastSettings::default().with_filter(&solid));
     let picked = hits.iter().find_map(|(entity, _)| {
         let id = node_of(*entity, nodes, parents)?;
         state

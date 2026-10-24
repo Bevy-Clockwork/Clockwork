@@ -12,12 +12,14 @@ path = "src/main.rs"
 [dependencies]
 axum = "0.8"
 base64 = "0.23"
+bevy.workspace = true
 clockwork_core.workspace = true
 clockwork_gba.workspace = true
 clockwork_library.workspace = true
 clockwork_n64.workspace = true
 clockwork_platforms.workspace = true
 clockwork_recipe.workspace = true
+clockwork_runtime.workspace = true
 image.workspace = true
 regex = "1"
 rmcp = { version = "3.6", features = ["server", "transport-io", "macros", "schemars", "transport-streamable-http-server"] }

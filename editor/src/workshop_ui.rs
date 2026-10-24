@@ -1910,6 +1910,45 @@ fn actor_editor(
     }
 }
 
+/// A script's commands, as RON (parsed as typed), and whether it holds the player.
+fn script_editor(ui: &mut egui::Ui, salt: &str, script: &mut clockwork_core::script::Script) {
+    ui.checkbox(&mut script.hold_player, "Hold the player (a cutscene)");
+    // The text being typed is kept while it doesn't parse yet.
+    let key = egui::Id::new(("script_steps", salt));
+    let written = ron::ser::to_string_pretty(&script.steps, ron::ser::PrettyConfig::default())
+        .unwrap_or_default();
+    let mut text: String = ui
+        .data_mut(|d| d.get_temp::<(String, String)>(key))
+        .filter(|(from, _)| *from == written)
+        .map_or_else(|| written.clone(), |(_, typed)| typed);
+    ui.label(kit::hint(
+        "Commands: Do(effect), Wait(s), Until(condition), Walk(node, to, speed), Place(node, to), Hold(bool), If, Repeat, End",
+    ));
+    let response = ui.add(
+        egui::TextEdit::multiline(&mut text)
+            .code_editor()
+            .desired_rows(6)
+            .desired_width(f32::INFINITY),
+    );
+    let parse = |text: &str| ron::from_str::<Vec<clockwork_core::script::Command>>(text);
+    let mut from = written;
+    if response.changed()
+        && let Ok(steps) = parse(&text)
+    {
+        script.steps = steps;
+        from = ron::ser::to_string_pretty(&script.steps, Default::default()).unwrap_or_default();
+    }
+    if text != from
+        && let Err(why) = parse(&text)
+    {
+        ui.colored_label(theme::WARN, why.to_string());
+    }
+    ui.data_mut(|d| d.insert_temp(key, (from, text)));
+    for problem in script.problems() {
+        ui.colored_label(theme::WARN, problem);
+    }
+}
+
 /// Makes an effect of a kind, from the known items and node names.
 type NewEffect = fn(&[(String, String)], &[String]) -> crate::entities::Effect;
 
@@ -1923,7 +1962,7 @@ fn effect_editor(
     names: &[String],
 ) {
     use crate::entities::Effect;
-    let choices: [(&str, NewEffect); 11] = [
+    let choices: [(&str, NewEffect); 13] = [
         ("Show a message", |_, _| Effect::Message("Hello!".into())),
         ("Teleport the player", |_, names| {
             Effect::Teleport(names.first().cloned().unwrap_or_default())
@@ -1943,9 +1982,20 @@ fn effect_editor(
             ))
         }),
         ("Play a sound", |_, _| Effect::Sound(String::new())),
+        ("Play music", |_, _| Effect::Music(String::new())),
         ("Raise a flag", |_, _| Effect::Set(String::new())),
         ("Lower a flag", |_, _| Effect::Clear(String::new())),
         ("Do several things", |_, _| Effect::All(Vec::new())),
+        ("Run a script", |_, _| {
+            use clockwork_core::script::{Command, Script};
+            Effect::Run(Box::new(Script {
+                steps: vec![
+                    Command::Wait(1.0),
+                    Command::Do(Effect::Message("A second later".into())),
+                ],
+                hold_player: false,
+            }))
+        }),
     ];
     let label = match effect {
         Effect::Message(_) => "Show a message",
@@ -1956,9 +2006,11 @@ fn effect_editor(
         Effect::Heal(_) => "Heal the player",
         Effect::Say(_) => "Show a dialog",
         Effect::Sound(_) => "Play a sound",
+        Effect::Music(_) => "Play music",
         Effect::Set(_) => "Raise a flag",
         Effect::Clear(_) => "Lower a flag",
         Effect::All(_) => "Do several things",
+        Effect::Run(_) => "Run a script",
     };
     egui::ComboBox::from_id_salt((salt, "kind"))
         .selected_text(label)
@@ -2019,19 +2071,25 @@ fn effect_editor(
         Effect::Say(clockwork_core::asset::Slot::Ref(at)) => {
             ui.label(format!("The dialog {at}"));
         }
-        Effect::Sound(name) => {
+        Effect::Sound(_) | Effect::Music(_) => {
+            let (kind, none) = match effect {
+                Effect::Music(_) => ("Music", "(no music)"),
+                _ => ("Sound", "(choose a sound)"),
+            };
+            let (Effect::Sound(name) | Effect::Music(name)) = effect else {
+                unreachable!()
+            };
             let sounds: Vec<String> =
                 clockwork_recipe::assets::AssetIndex::build(&state.workshop.plugins)
-                    .of_kind("Sound")
+                    .of_kind(kind)
                     .map(|a| a.at.to_string())
                     .collect();
             egui::ComboBox::from_id_salt((salt, "sound"))
-                .selected_text(if name.is_empty() {
-                    "(choose a sound)"
-                } else {
-                    name.as_str()
-                })
+                .selected_text(if name.is_empty() { none } else { name.as_str() })
                 .show_ui(ui, |ui| {
+                    if kind == "Music" && ui.selectable_label(name.is_empty(), none).clicked() {
+                        name.clear();
+                    }
                     for sound in sounds {
                         if ui.selectable_label(*name == sound, &sound).clicked() {
                             *name = sound;
@@ -2050,6 +2108,7 @@ fn effect_editor(
         Effect::Set(flag) | Effect::Clear(flag) => {
             ui.add(egui::TextEdit::singleline(flag).hint_text("flag name"));
         }
+        Effect::Run(script) => script_editor(ui, salt, script),
         Effect::All(list) => {
             let mut remove = None;
             ui.indent((salt, "all"), |ui| {

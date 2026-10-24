@@ -339,3 +339,222 @@ fn beating_every_actor_wins_a_destroy_all_game() {
     let happened = walk(&mut play, &map, &nowhere, Vec2::ZERO, STEP);
     assert!(matches!(happened.last(), Some(Happened::Won(_))));
 }
+
+#[test]
+fn a_trigger_runs_a_cutscene_that_holds_the_player_and_walks_a_guard() {
+    let map = floor();
+    let cutscene: Effect = ron::from_str(
+        r#"Run((hold_player: true, steps: [
+            Walk(node: "Guard", to: "Gate", speed: 2.0),
+            Do(Message("Halt!")),
+            Wait(0.5),
+            Do(Set("talked")),
+        ]))"#,
+    )
+    .unwrap();
+    let nodes = vec![
+        placed(
+            2,
+            "Plate",
+            Vec3::new(0.5, 0.0, 0.0),
+            vec![Behavior::Trigger {
+                radius: 0.5,
+                effect: cutscene,
+                once: true,
+            }],
+        ),
+        placed(
+            3,
+            "Guard",
+            Vec3::new(4.0, 0.0, 0.0),
+            vec![Behavior::Solid { radius: 0.4 }],
+        ),
+        placed(4, "Gate", Vec3::new(4.0, 0.0, 2.0), vec![]),
+    ];
+    let places = |name: &str| match name {
+        "Gate" => Some(Vec3::new(4.0, 0.0, 2.0)),
+        "Guard" => Some(Vec3::new(4.0, 0.0, 0.0)),
+        _ => None,
+    };
+    let mut play = play(nodes, Rules::default());
+    // Stepping on the plate starts the cutscene; the player stops there however it pushes.
+    walk(&mut play, &map, &places, Vec2::X, 0.1);
+    assert!(play.held());
+    let stopped = play.position();
+    let happened = walk(&mut play, &map, &places, Vec2::X, 0.5);
+    assert_eq!(play.position(), stopped);
+    // Two meters at two meters a second: the guard is at the gate after a second.
+    assert!(!happened.contains(&Happened::Notice("Halt!".into())));
+    let happened = walk(&mut play, &map, &places, Vec2::X, 0.6);
+    assert!(happened.contains(&Happened::Notice("Halt!".into())));
+    assert_eq!(play.moved.get(&3), Some(&Vec3::new(4.0, 0.0, 2.0)));
+    assert!(
+        play.entities
+            .live
+            .iter()
+            .any(|e| e.node == 3 && e.at.z == 2.0)
+    );
+    walk(&mut play, &map, &places, Vec2::X, 0.6);
+    assert!(play.entities.flags.contains("talked"));
+    assert!(!play.held(), "the cutscene ended");
+    walk(&mut play, &map, &places, Vec2::X, 0.3);
+    assert!(play.position().x > stopped.x, "the player walks again");
+}
+
+/// The open floor as a level.
+fn level(map: &SurfaceMap) -> Level<'_> {
+    Level {
+        areas: vec![Area {
+            to_local: bevy::math::Affine3A::IDENTITY,
+            size: Vec2::splat(20.0),
+            height: 0.0,
+            map,
+        }],
+        terrains: vec![],
+    }
+}
+
+fn toward(name: &str, seconds: f32) -> playtest::Step {
+    playtest::Step {
+        hold: playtest::Hold::Toward(name.into()),
+        seconds,
+        walk: false,
+        buttons: vec![],
+    }
+}
+
+#[test]
+fn a_script_walks_to_the_key_then_the_exit_and_wins() {
+    let map = floor();
+    let nodes = vec![
+        placed(
+            2,
+            "Key",
+            Vec3::new(3.0, 0.0, 2.0),
+            vec![Behavior::Pickup {
+                item: "key".into(),
+                count: 1,
+                radius: 0.5,
+            }],
+        ),
+        placed(3, "Exit", Vec3::new(-4.0, 0.0, 0.0), vec![]),
+    ];
+    let exit = Vec3::new(-4.0, 0.0, 0.0);
+    let places = |name: &str| (name == "Exit").then_some(exit);
+    let rules = Rules {
+        goal: Some(Goal::Reach("Exit".into())),
+        ..Default::default()
+    };
+    let steps = [toward("Key", 5.0), toward("Exit", 5.0), toward("Key", 1.0)];
+    let report = playtest::run(
+        &mut play(nodes, rules),
+        &level(&map),
+        &places,
+        &Words::default(),
+        &steps,
+    );
+    let said: Vec<&str> = report.events.iter().map(|e| e.what.as_str()).collect();
+    assert!(said.contains(&"Got Key x1"), "{said:?}");
+    assert!(said.contains(&"\"Key\" is gone"), "{said:?}");
+    assert!(report.steps[0].reached.is_some());
+    assert!(report.steps[1].reached.is_some() || report.won.is_some());
+    assert!(report.won.is_some());
+    assert!(report.steps[2].skipped, "nothing is played once won");
+    assert_eq!(report.carried, vec![("key".to_string(), 1)]);
+    assert!(report.never_reached.is_empty());
+    // The same script plays the same way.
+    let again = playtest::run(
+        &mut play(
+            vec![
+                placed(
+                    2,
+                    "Key",
+                    Vec3::new(3.0, 0.0, 2.0),
+                    vec![Behavior::Pickup {
+                        item: "key".into(),
+                        count: 1,
+                        radius: 0.5,
+                    }],
+                ),
+                placed(3, "Exit", exit, vec![]),
+            ],
+            Rules {
+                goal: Some(Goal::Reach("Exit".into())),
+                ..Default::default()
+            },
+        ),
+        &level(&map),
+        &places,
+        &Words::default(),
+        &steps,
+    );
+    assert_eq!(report, again);
+}
+
+#[test]
+fn a_script_reports_walls_hurts_and_what_it_never_reached() {
+    let map = floor();
+    let nodes = vec![
+        placed(
+            2,
+            "Wall",
+            Vec3::new(2.0, 0.0, 0.0),
+            vec![Behavior::Solid { radius: 1.0 }],
+        ),
+        placed(3, "Moblin", Vec3::new(0.0, 0.0, 2.5), vec![chaser()]),
+        placed(
+            4,
+            "Chest",
+            Vec3::new(-6.0, 0.0, -6.0),
+            vec![Behavior::Pickup {
+                item: "key".into(),
+                count: 1,
+                radius: 0.5,
+            }],
+        ),
+    ];
+    let steps = [
+        playtest::Step {
+            hold: playtest::Hold::Direction(Vec2::X),
+            seconds: 1.5,
+            walk: false,
+            buttons: vec![],
+        },
+        playtest::Step {
+            hold: playtest::Hold::Still,
+            seconds: 2.0,
+            walk: false,
+            buttons: vec![playtest::Button::A],
+        },
+        toward("Nowhere", 0.5),
+    ];
+    let report = playtest::run(
+        &mut play(nodes, Rules::default()),
+        &level(&map),
+        &nowhere,
+        &Words::default(),
+        &steps,
+    );
+    let text = report.to_string();
+    assert!(report.steps[0].stuck.is_some(), "{text}");
+    assert!(
+        report
+            .events
+            .iter()
+            .any(|e| e.what.starts_with("hurt by \"Moblin\"")),
+        "{text}"
+    );
+    assert!(
+        report
+            .events
+            .iter()
+            .any(|e| e.what == "\"Moblin\" is now chase"),
+        "{text}"
+    );
+    assert!(text.contains("no node called \"Nowhere\""), "{text}");
+    assert_eq!(report.never_reached.len(), 1, "{text}");
+    assert_eq!(report.never_reached[0].name, "Chest");
+    assert_eq!(report.standing[0].name, "Moblin");
+    assert!(report.health.0 < report.health.1);
+    assert!(report.won.is_none());
+}
