@@ -2187,7 +2187,7 @@ pub(crate) fn info_row(ui: &mut egui::Ui, key: &str, value: &str) {
     ui.end_row();
 }
 
-fn truncate(text: &str, max: usize) -> String {
+pub(crate) fn truncate(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         text.to_string()
     } else {

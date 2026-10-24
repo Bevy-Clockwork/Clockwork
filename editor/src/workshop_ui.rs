@@ -134,6 +134,13 @@ pub fn workshop_screen(
         {
             let name = plugin.manifest.plugin.name.clone();
             state.workshop.place(&name, &item.output, ROOT, true);
+            // The rest of the selection comes along.
+            for (plugin, output) in &item.more {
+                if let Some(plugin) = state.workshop.plugins.get(*plugin) {
+                    let name = plugin.manifest.plugin.name.clone();
+                    state.workshop.place(&name, output, ROOT, true);
+                }
+            }
         }
     }
 
