@@ -75,6 +75,8 @@ pub struct Extractions {
     pending: HashMap<String, Task<Result<Extracted, String>>>,
     /// ROMs in canonical form, by SHA-1, read on first use. Kept when plugins change.
     roms: HashMap<String, Arc<Vec<u8>>>,
+    /// ROMs read since the Library last heard, so it can note when each game was last used.
+    read: Vec<String>,
 }
 
 impl SceneView {
@@ -231,6 +233,7 @@ impl Extractions {
         }
         let rom = Arc::new(state.library.rom_bytes(entry).map_err(|e| e.to_string())?);
         self.roms.insert(entry.sha1.clone(), rom.clone());
+        self.read.push(entry.sha1.clone());
         Ok(rom)
     }
 
@@ -294,6 +297,9 @@ pub fn extraction_system(mut state: ResMut<EditorState>, mut extractions: ResMut
     for (plugin, result) in done {
         extractions.pending.remove(&plugin);
         extractions.finish(&mut state, &plugin, result);
+    }
+    for sha1 in std::mem::take(&mut extractions.read) {
+        state.mark_used(&sha1);
     }
 }
 

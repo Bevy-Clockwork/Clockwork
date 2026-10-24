@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use bevy::prelude::*;
-use clockwork_library::{Game, Library, LibraryEntry, boxart::display_name};
+use clockwork_library::{Game, GameNotes, Library, LibraryEntry, boxart::display_name};
 use clockwork_recipe::Plugin;
 
 use crate::scene::{ItemRef, NodeId, Scene};
@@ -49,6 +49,8 @@ pub struct EditorState {
     pub names: BTreeMap<String, String>,
     /// Decompilation repositories linked to games, by SHA-1.
     pub decomps: BTreeMap<String, String>,
+    /// When games were added and last used, favourites and tags, by SHA-1.
+    pub notes: BTreeMap<String, GameNotes>,
     /// Text in the details panel's repository field.
     pub decomp_input: String,
     /// Games the user asked to look up box art for again.
@@ -380,6 +382,12 @@ impl EditorState {
                 .iter()
                 .filter_map(|g| Some((g.sha1.clone(), g.decomp.clone()?)))
                 .collect(),
+            notes: stored
+                .games
+                .iter()
+                .filter(|g| !g.sha1.is_empty() && !g.notes.is_empty())
+                .map(|g| (g.sha1.clone(), g.notes.clone()))
+                .collect(),
             decomp_input: String::new(),
             boxart_retry: Vec::new(),
             boxart_busy: false,
@@ -529,6 +537,10 @@ impl EditorState {
             let (index, new) = self.library.add(entry);
             if new {
                 changed = true;
+                let notes = self.notes.entry(sha1).or_default();
+                if notes.added == 0 {
+                    notes.added = clockwork_library::agents::now();
+                }
                 self.selected = Some(index);
                 self.log(LogLevel::Info, format!("Imported {title}"));
             } else {
@@ -613,9 +625,36 @@ impl EditorState {
         }
     }
 
+    /// What the user's use of a game added to it.
+    pub fn notes(&self, sha1: &str) -> GameNotes {
+        self.notes.get(sha1).cloned().unwrap_or_default()
+    }
+
+    /// Changes a game's notes, and saves the Library.
+    pub fn edit_notes(&mut self, sha1: &str, edit: impl FnOnce(&mut GameNotes)) {
+        let notes = self.notes.entry(sha1.to_string()).or_default();
+        let before = notes.clone();
+        edit(notes);
+        if *notes != before {
+            self.save();
+        }
+    }
+
+    /// Notes that a game's ROM was read for a plugin.
+    pub fn mark_used(&mut self, sha1: &str) {
+        let now = clockwork_library::agents::now();
+        self.edit_notes(sha1, |n| n.used = now);
+    }
+
     /// The Library's records: every entry, then the missing games.
     fn games_to_save(&self) -> Vec<Game> {
-        games_to_save(&self.library, &self.missing, &self.names, &self.decomps)
+        games_to_save(
+            &self.library,
+            &self.missing,
+            &self.names,
+            &self.decomps,
+            &self.notes,
+        )
     }
 
     pub fn save(&mut self) {
@@ -633,6 +672,7 @@ fn games_to_save(
     missing: &[Game],
     names: &BTreeMap<String, String>,
     decomps: &BTreeMap<String, String>,
+    notes: &BTreeMap<String, GameNotes>,
 ) -> Vec<Game> {
     let mut games: Vec<Game> = library.entries().iter().map(|e| library.game(e)).collect();
     for game in missing {
@@ -649,6 +689,9 @@ fn games_to_save(
         }
         if let Some(decomp) = decomps.get(&game.sha1) {
             game.decomp = Some(decomp.clone());
+        }
+        if let Some(notes) = notes.get(&game.sha1) {
+            game.notes = notes.clone();
         }
     }
     games
@@ -678,12 +721,20 @@ mod tests {
         let missing = [unplugged.clone(), Game::at(PathBuf::from("here.gba"))];
         let sha1 = library.entries()[0].sha1.clone();
         let names = BTreeMap::from([(sha1.clone(), "Here (USA)".to_string())]);
-        let decomps = BTreeMap::from([(sha1, "https://example.com/here".to_string())]);
-        let games = games_to_save(&library, &missing, &names, &decomps);
+        let decomps = BTreeMap::from([(sha1.clone(), "https://example.com/here".to_string())]);
+        let notes = BTreeMap::from([(
+            sha1.clone(),
+            GameNotes {
+                favourite: true,
+                ..Default::default()
+            },
+        )]);
+        let games = games_to_save(&library, &missing, &names, &decomps, &notes);
         assert_eq!(games.len(), 2);
         assert_eq!(games[0].path, PathBuf::from("here.gba"));
         assert_eq!(games[0].name.as_deref(), Some("Here (USA)"));
         assert_eq!(games[0].decomp.as_deref(), Some("https://example.com/here"));
+        assert!(games[0].notes.favourite);
         // A missing game keeps what it was, name and all.
         assert_eq!(games[1], unplugged);
     }

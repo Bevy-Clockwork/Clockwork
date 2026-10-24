@@ -358,6 +358,12 @@ A Godot-style composer for combining plugins:
   with **Import games** or **Import a folder of games** (every game file in it and its folders,
   a cue sheet standing for its `.bin` files; `clockwork_library::scan_folder`), and the toolbar
   shows "Importing 12 of 340…" with **Cancel**. The remote control has `Import(["path", …])`.
+  Each record also keeps `notes` (`GameNotes`): when the game was added and last used (its ROM
+  last read for a plugin), whether it is a favourite (★ on its cover, from its menu or the
+  details panel) and its tags (added in the details panel; the search finds games by tag). The
+  toolbar's **Filter** shows only favourites, games with plugins or games with a
+  decompilation, **Sort** has **Last used**, and a cover shows how many plugins are made for its
+  game. The remote control's `Game("title")` shows a game's details.
 - **Resolve dependencies:** show unmet `requires`, choose providers or stubs.
 - **Resolve conflicts:** competing providers, scale mismatches, input conflicts.
 - Choose **dimension adapters** when mixing 2D and 3D content.

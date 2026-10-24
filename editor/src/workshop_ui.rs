@@ -2132,6 +2132,7 @@ mod tests {
             fetch_box_art: false,
             names: Default::default(),
             decomps: Default::default(),
+            notes: Default::default(),
             decomp_input: String::new(),
             boxart_retry: Vec::new(),
             boxart_busy: false,
