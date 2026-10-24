@@ -17,6 +17,7 @@ mod flow_play;
 mod game_sound;
 mod game_ui;
 mod graph_view;
+mod imports;
 mod kit;
 mod manipulate;
 mod models;

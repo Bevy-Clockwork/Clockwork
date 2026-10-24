@@ -353,7 +353,11 @@ A Godot-style composer for combining plugins:
   name and its decompilation), shared with the agent. A game whose file can't be read stays in
   the Library: the toolbar's **⚠ missing** menu lists each with where it was, **Locate…** (pick
   the file where it is now; the same game by hash or a file at its old place counts as found)
-  and **Forget**.
+  and **Forget**. Games are read and hashed on a worker thread (`editor/src/imports.rs`), so a
+  disc image never stalls the window: files and folders can be dropped anywhere or imported
+  with **Import games** or **Import a folder of games** (every game file in it and its folders,
+  a cue sheet standing for its `.bin` files; `clockwork_library::scan_folder`), and the toolbar
+  shows "Importing 12 of 340…" with **Cancel**. The remote control has `Import(["path", …])`.
 - **Resolve dependencies:** show unmet `requires`, choose providers or stubs.
 - **Resolve conflicts:** competing providers, scale mismatches, input conflicts.
 - Choose **dimension adapters** when mixing 2D and 3D content.

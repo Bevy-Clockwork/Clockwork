@@ -44,6 +44,7 @@ const ZOOM_STEP: f32 = 0.1;
 #[derive(Default)]
 pub struct Dialogs {
     roms: Option<Task<Option<Vec<rfd::FileHandle>>>>,
+    folder: Option<Task<Option<rfd::FileHandle>>>,
     /// The game a cover is being picked for, and the dialog.
     cover: Option<(String, Task<Option<rfd::FileHandle>>)>,
     /// The title of a game being exported, and the dialog choosing where it goes.
@@ -56,6 +57,7 @@ pub struct Dialogs {
 #[derive(Default)]
 struct Actions {
     import_roms: bool,
+    import_folder: bool,
     pick_cover: Option<String>,
     reset_cover: Option<String>,
     remove: Option<usize>,
@@ -152,6 +154,10 @@ pub fn editor_ui(
     });
     if !dropped.is_empty() {
         state.import(dropped);
+    }
+    state.poll_imports();
+    if state.imports.progress().is_some() {
+        ctx.request_repaint_after(std::time::Duration::from_millis(100));
     }
 
     let mut actions = Actions::default();
@@ -291,6 +297,15 @@ pub fn editor_ui(
             ),
         );
     }
+    if actions.import_folder && dialogs.folder.is_none() {
+        dialogs.folder = Some(
+            AsyncComputeTaskPool::get().spawn(
+                rfd::AsyncFileDialog::new()
+                    .set_title("Import every game in a folder")
+                    .pick_folder(),
+            ),
+        );
+    }
     if let Some(was) = actions.locate.take()
         && dialogs.locate.is_none()
     {
@@ -411,6 +426,7 @@ fn run_command(
     match command {
         AppCommand::Go(screen) => state.screen = screen,
         AppCommand::ImportRoms => actions.import_roms = true,
+        AppCommand::ImportFolder => actions.import_folder = true,
         AppCommand::ExportGame => state.workshop.export = Some(default_export_title(state)),
         AppCommand::Undo => undo_redo(state, history, true),
         AppCommand::Redo => undo_redo(state, history, false),
@@ -634,6 +650,12 @@ fn poll_dialogs(
             state.locate(i, file.path().to_path_buf());
         }
     }
+    if let Some(picked) = dialogs.folder.as_mut().and_then(|t| block_on(poll_once(t))) {
+        dialogs.folder = None;
+        if let Some(folder) = picked {
+            state.import([folder.path().to_path_buf()]);
+        }
+    }
     if let Some(picked) = dialogs.roms.as_mut().and_then(|t| block_on(poll_once(t))) {
         dialogs.roms = None;
         if let Some(files) = picked {
@@ -786,6 +808,9 @@ fn menus(ui: &mut egui::Ui, state: &mut EditorState, history: &History, actions:
         ui.menu_button("File", |ui| {
             if item(ui, "Import games…", "Ctrl+O").clicked() {
                 actions.commands.push(AppCommand::ImportRoms);
+            }
+            if item(ui, "Import a folder of games…", "").clicked() {
+                actions.commands.push(AppCommand::ImportFolder);
             }
             if item(ui, "Export game…", "Ctrl+E").clicked() {
                 actions.commands.push(AppCommand::ExportGame);
@@ -1104,6 +1129,17 @@ fn library_toolbar(
                 if !state.missing.is_empty() {
                     missing_menu(ui, state, actions);
                 }
+                if let Some((done, total)) = state.imports.progress() {
+                    ui.add(egui::Spinner::new().size(12.0));
+                    ui.label(kit::hint(format!("Importing {done} of {total}…")));
+                    if ui
+                        .small_button("Cancel")
+                        .on_hover_text("Stop after the file being read")
+                        .clicked()
+                    {
+                        state.imports.cancel();
+                    }
+                }
                 ui.add_space(14.0);
                 if platforms.len() > 1 {
                     let mut choice = view.platform;
@@ -1121,10 +1157,18 @@ fn library_toolbar(
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if kit::primary_button(ui, true, "+  Import games")
-                        .on_hover_text(kit::tip("Add games you own to the Library", "Ctrl+O"))
+                        .on_hover_text(kit::tip(
+                            "Add games you own to the Library (or drop files and folders here)",
+                            "Ctrl+O",
+                        ))
                         .clicked()
                     {
                         actions.import_roms = true;
+                    }
+                    if kit::icon_button(ui, "🗁", "Import every game in a folder and its folders")
+                        .clicked()
+                    {
+                        actions.import_folder = true;
                     }
                     ui.add_space(8.0);
                     kit::segmented(
@@ -1484,11 +1528,19 @@ fn empty_shelf(ui: &mut egui::Ui, actions: &mut Actions) {
                 .color(theme::PARCHMENT),
         );
         ui.label(kit::dim(
-            "Drop game images or executables anywhere on this window, or import them.",
+            "Drop game images, executables or folders anywhere on this window, or import them.",
         ));
         ui.add_space(12.0);
         if kit::primary_button(ui, true, "+  Import games…").clicked() {
             actions.import_roms = true;
+        }
+        ui.add_space(6.0);
+        if ui
+            .button("Import a folder of games…")
+            .on_hover_text("Every game in a folder and the folders in it")
+            .clicked()
+        {
+            actions.import_folder = true;
         }
         ui.add_space(10.0);
         ui.label(kit::hint(

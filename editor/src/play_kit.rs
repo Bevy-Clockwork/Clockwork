@@ -307,6 +307,7 @@ mod tests {
         EditorState {
             library: clockwork_library::Library::new(),
             missing: Vec::new(),
+            imports: Default::default(),
             selected: None,
             search: String::new(),
             agent_prompt: String::new(),

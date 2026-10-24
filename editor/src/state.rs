@@ -37,6 +37,8 @@ pub struct EditorState {
     /// file). They stay in the saved Library, so they come back once they can be read again,
     /// or once the user locates their file.
     pub missing: Vec<Game>,
+    /// Games being read in the background.
+    pub imports: crate::imports::Imports,
     pub selected: Option<usize>,
     pub search: String,
     pub agent_prompt: String,
@@ -361,6 +363,7 @@ impl EditorState {
         let mut state = Self {
             library: Library::new().with_platforms(clockwork_platforms::all()),
             missing: Vec::new(),
+            imports: Default::default(),
             selected: None,
             search: String::new(),
             agent_prompt: String::new(),
@@ -494,28 +497,42 @@ impl EditorState {
         self.log.push(LogLine { level, text });
     }
 
+    /// Imports game files, and the game files in folders, reading them in the background
+    /// (see [`EditorState::poll_imports`]).
     pub fn import(&mut self, paths: impl IntoIterator<Item = PathBuf>) {
+        let identifier = self.library.identifier();
+        self.imports.queue(identifier, paths);
+    }
+
+    /// Adds what the background imports read since last time.
+    pub fn poll_imports(&mut self) {
+        let read = self.imports.take();
+        if read.is_empty() {
+            return;
+        }
         let mut changed = false;
-        for path in paths {
-            let before = self.library.entries().len();
-            match self.library.import(&path) {
-                Ok(entry) => {
-                    let (title, sha1) = (entry.info.title.clone(), entry.sha1.clone());
-                    // A missing game is found: at its old place, or as the same game elsewhere.
-                    let found = |g: &Game| g.path == path || (!g.sha1.is_empty() && g.sha1 == sha1);
-                    if self.missing.iter().any(found) {
-                        self.missing.retain(|g| !found(g));
-                        changed = true;
-                    }
-                    if self.library.entries().len() > before {
-                        changed = true;
-                        self.selected = Some(before);
-                        self.log(LogLevel::Info, format!("Imported {title}"));
-                    } else {
-                        self.log(LogLevel::Info, format!("{title} is already in the Library"));
-                    }
+        for (path, result) in read {
+            let entry = match result {
+                Ok(entry) => entry,
+                Err(e) => {
+                    self.log(LogLevel::Error, e);
+                    continue;
                 }
-                Err(e) => self.log(LogLevel::Error, e.to_string()),
+            };
+            let (title, sha1) = (entry.info.title.clone(), entry.sha1.clone());
+            // A missing game is found: at its old place, or as the same game elsewhere.
+            let found = |g: &Game| g.path == path || (!g.sha1.is_empty() && g.sha1 == sha1);
+            if self.missing.iter().any(found) {
+                self.missing.retain(|g| !found(g));
+                changed = true;
+            }
+            let (index, new) = self.library.add(entry);
+            if new {
+                changed = true;
+                self.selected = Some(index);
+                self.log(LogLevel::Info, format!("Imported {title}"));
+            } else {
+                self.log(LogLevel::Info, format!("{title} is already in the Library"));
             }
         }
         if changed {
