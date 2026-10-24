@@ -175,14 +175,26 @@ impl Song {
 
 /// Text from `bytes` starting at `at` up to the `end` byte (or `length` bytes): each byte the
 /// text `codes` gives it, else its character in a run of `runs`, else `other`.
+/// What a game's text bytes mean (see [`Step::Text`]).
+#[derive(Clone, Copy)]
+struct CharMap<'a> {
+    runs: &'a [(u8, String)],
+    codes: &'a std::collections::BTreeMap<u8, String>,
+    params: &'a std::collections::BTreeMap<u8, u8>,
+}
+
 fn decode_text(
     bytes: &[u8],
     at: u32,
-    runs: &[(u8, String)],
-    codes: &std::collections::BTreeMap<u8, String>,
+    map: CharMap<'_>,
     (end, length): (u8, Option<u32>),
     other: Option<&str>,
 ) -> Result<String, String> {
+    let CharMap {
+        runs,
+        codes,
+        params,
+    } = map;
     let mut text = String::new();
     let mut i = at as usize;
     loop {
@@ -194,6 +206,14 @@ fn decode_text(
         };
         if byte == end {
             return Ok(text);
+        }
+        if let Some(&count) = params.get(&byte) {
+            // A control code and its parameters: only the code means something.
+            if let Some(code) = codes.get(&byte) {
+                text.push_str(code);
+            }
+            i += 1 + count as usize;
+            continue;
         }
         if let Some(code) = codes.get(&byte) {
             text.push_str(code);
@@ -489,6 +509,7 @@ fn run_step(step: usize, s: &Step, rom: &[u8], made: &mut Made) -> Result<(), Re
                 at,
                 runs,
                 codes,
+                params,
                 end,
                 length,
                 other,
@@ -497,8 +518,18 @@ fn run_step(step: usize, s: &Step, rom: &[u8], made: &mut Made) -> Result<(), Re
                 let bytes = buffers
                     .get(from.as_str())
                     .ok_or_else(|| unknown("buffer", from))?;
-                let text = decode_text(bytes, *at, runs, codes, (*end, *length), other.as_deref())
-                    .map_err(|message| RecipeError::Decode { step, message })?;
+                let text = decode_text(
+                    bytes,
+                    *at,
+                    CharMap {
+                        runs,
+                        codes,
+                        params,
+                    },
+                    (*end, *length),
+                    other.as_deref(),
+                )
+                .map_err(|message| RecipeError::Decode { step, message })?;
                 buffers.insert(into.clone(), text.into_bytes());
             }
             Step::Canvas {
@@ -1776,8 +1807,11 @@ mod tests {
             decode_text(
                 &[0x02, 0xFF],
                 0,
-                &runs,
-                &Default::default(),
+                CharMap {
+                    runs: &runs,
+                    codes: &Default::default(),
+                    params: &Default::default(),
+                },
                 (0xFF, None),
                 None
             )
@@ -1788,8 +1822,11 @@ mod tests {
             decode_text(
                 &[0x02, 0xFF],
                 0,
-                &runs,
-                &Default::default(),
+                CharMap {
+                    runs: &runs,
+                    codes: &Default::default(),
+                    params: &Default::default(),
+                },
                 (0xFF, None),
                 Some("?")
             )
@@ -1802,13 +1839,36 @@ mod tests {
             decode_text(
                 &[0x00, 0x01, 0x00],
                 0,
-                &runs,
-                &Default::default(),
+                CharMap {
+                    runs: &runs,
+                    codes: &Default::default(),
+                    params: &Default::default(),
+                },
                 (0xFF, Some(2)),
                 None
             )
             .unwrap(),
             "AB"
+        );
+        // Control codes skip their parameters, even ones equal to the end byte; the code means
+        // what `codes` gives it.
+        let letters = vec![(0x41, "AB".to_string())];
+        let codes = [(0x03, "!".to_string())].into_iter().collect();
+        let params = [(0x02, 1), (0x03, 2)].into_iter().collect();
+        assert_eq!(
+            decode_text(
+                &[0x41, 0x02, 0x05, 0x42, 0x03, 0x00, 0x41, 0x41, 0x00],
+                0,
+                CharMap {
+                    runs: &letters,
+                    codes: &codes,
+                    params: &params,
+                },
+                (0x00, None),
+                None
+            )
+            .unwrap(),
+            "AB!A"
         );
     }
 
