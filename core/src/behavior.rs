@@ -1,5 +1,5 @@
 //! Behaviors that make scene nodes do things when played: targets that can be hit and destroyed,
-//! pickups, triggers, checkpoints, solid obstacles, hazards and doors. A behavior is generic (it
+//! pickups, triggers, checkpoints, solid obstacles, hazards, doors and actors. A behavior is generic (it
 //! knows nothing of any game); what a node looks like is whatever plugin output it shows.
 //!
 //! Behaviors are assets too: a node can name one ("builtin/spikes", a plugin's "rupee") so
@@ -45,6 +45,9 @@ pub enum Behavior {
     /// Takes the player to the node called `to`, the screen fading out and in over `fade`
     /// seconds.
     Door { radius: f32, to: String, fade: f32 },
+    /// Acts on its own: moves, chases, hurts the player and can be beaten, as its states say
+    /// (see [`crate::actor`]).
+    Actor(Box<crate::actor::Actor>),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -152,7 +155,7 @@ impl NodeBehavior {
 }
 
 impl Behavior {
-    pub const KINDS: [&'static str; 7] = [
+    pub const KINDS: [&'static str; 8] = [
         "Target",
         "Pickup",
         "Trigger",
@@ -160,6 +163,7 @@ impl Behavior {
         "Solid",
         "Hazard",
         "Door",
+        "Actor",
     ];
 
     /// A new behavior of a kind from [`Behavior::KINDS`], with sensible defaults.
@@ -192,6 +196,7 @@ impl Behavior {
                 to: String::new(),
                 fade: 0.6,
             },
+            "Actor" => Behavior::Actor(Box::new(crate::actor::Actor::example())),
             _ => return None,
         })
     }
@@ -205,6 +210,7 @@ impl Behavior {
             Behavior::Solid { .. } => "Solid",
             Behavior::Hazard { .. } => "Hazard",
             Behavior::Door { .. } => "Door",
+            Behavior::Actor(_) => "Actor",
         }
     }
 
@@ -217,6 +223,7 @@ impl Behavior {
             | Behavior::Solid { radius }
             | Behavior::Hazard { radius, .. }
             | Behavior::Door { radius, .. } => *radius,
+            Behavior::Actor(actor) => actor.radius,
         }
     }
 
@@ -230,6 +237,7 @@ impl Behavior {
             Behavior::Solid { .. } => [0.65, 0.65, 0.65],
             Behavior::Hazard { .. } => [0.9, 0.3, 0.75],
             Behavior::Door { .. } => [0.35, 0.85, 0.85],
+            Behavior::Actor(_) => [0.95, 0.55, 0.2],
         }
     }
 }

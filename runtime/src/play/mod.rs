@@ -5,6 +5,7 @@
 //!
 //! [`Play`] steps at a fixed rate ([`STEP`]), so a game plays the same whatever the frame rate.
 
+pub mod actors;
 pub mod entities;
 pub mod fighter;
 pub mod world;
@@ -457,15 +458,19 @@ impl Play {
         }
         self.fighter.feed(&controls.buttons, &frame.requests);
         self.leftover += frame.sim_dt;
-        {
+        while self.leftover >= STEP {
+            self.leftover -= STEP;
             let world = PlayWorld {
                 level,
                 entities: &self.entities,
             };
-            while self.leftover >= STEP {
-                self.leftover -= STEP;
-                self.avatar.step(&mut self.fighter, &world, controls);
-            }
+            self.avatar.step(&mut self.fighter, &world, controls);
+            // Actors move in the level: they don't block each other.
+            let inventory = self.fighter.inventory.as_ref();
+            self.entities
+                .act(STEP, self.avatar.position(), level, &|item| {
+                    inventory.map_or(0, |i| i.count(item))
+                });
         }
         self.vitals.safe = (self.vitals.safe - frame.sim_dt).max(0.0);
         // Behind a screen (the title, choosing a file or an act) nothing is touched.
@@ -576,11 +581,11 @@ impl Play {
                 Vec2::new(at.x - here.x, at.z - here.z).length() <= self.avatar.radius() + 0.5
             }),
             Goal::DestroyAll => {
-                let targets = self
-                    .entities
-                    .live
-                    .iter()
-                    .filter(|e| matches!(e.behavior, Behavior::Target { .. }));
+                let targets = self.entities.live.iter().filter(|e| match &e.behavior {
+                    Behavior::Target { .. } => true,
+                    Behavior::Actor(actor) => actor.health.is_some(),
+                    _ => false,
+                });
                 targets.clone().count() > 0 && targets.into_iter().all(|e| e.gone)
             }
             Goal::When(condition) => {

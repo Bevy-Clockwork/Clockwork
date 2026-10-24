@@ -61,6 +61,7 @@ pub fn scene_names(
 ) -> Vec<String> {
     // What leads to a node by name, with what it is.
     let mut wanted: Vec<(String, String)> = Vec::new();
+    let mut problems = BTreeSet::new();
     let by_node = |id| {
         entities
             .nodes
@@ -78,6 +79,16 @@ pub fn scene_names(
                 teleports(effect, &mut |to| {
                     wanted.push((to.to_string(), format!("a teleport of \"{from}\"")))
                 });
+            }
+            Behavior::Actor(actor) => {
+                for problem in actor.problems() {
+                    problems.insert(format!("the actor of \"{from}\": {problem}"));
+                }
+                for effect in actor.states.iter().filter_map(|s| s.enter.as_ref()) {
+                    teleports(effect, &mut |to| {
+                        wanted.push((to.to_string(), format!("a teleport of \"{from}\"")))
+                    });
+                }
             }
             _ => {}
         }
@@ -106,7 +117,6 @@ pub fn scene_names(
     for name in names {
         *count.entry(name).or_default() += 1;
     }
-    let mut problems = BTreeSet::new();
     for (name, what) in wanted {
         match count.get(name.as_str()).copied().unwrap_or(0) {
             0 => problems.insert(format!(

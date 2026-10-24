@@ -187,6 +187,19 @@ pub fn play_system(
             state.workshop.game_view = flow.is_game();
         }
         Some(false) => {
+            // Actors go back to their own animations, and their nodes to where they stand.
+            for mut rig in &mut rigs {
+                if state.workshop.acting.contains(&rig.node) {
+                    rig.playback = None;
+                    rig.time = 0.0;
+                }
+            }
+            for mut rig in &mut sprite_rigs {
+                if state.workshop.acting.contains(&rig.node) {
+                    rig.playback = None;
+                    rig.time = 0.0;
+                }
+            }
             if let Some(played) = session.play.take() {
                 for mut rig in &mut rigs {
                     if rig.node == played.node {
@@ -216,6 +229,7 @@ pub fn play_system(
             state.workshop.kit_sounds = Default::default();
             state.workshop.menu_paused = false;
             state.workshop.hidden_in_play.clear();
+            state.workshop.acting.clear();
             state.workshop.toast = None;
             state.workshop.play_clock = Default::default();
         }
@@ -448,6 +462,50 @@ pub fn play_system(
     let fights = !played.fighter.moves.actions.is_empty() || played.fighter.inventory.is_some();
     state.workshop.hud = fights.then(|| played.fighter.hud());
     state.workshop.health = Some((played.vitals.health, played.vitals.max));
+
+    // Actors where they went, showing their state's animation.
+    state.workshop.acting.clear();
+    for pose in played.entities.poses() {
+        if pose.node == played.node {
+            continue;
+        }
+        state.workshop.acting.insert(pose.node);
+        if let Some(entity) = view.entity(pose.node)
+            && let Ok(mut transform) = transforms.get_mut(entity)
+        {
+            let parent = state
+                .workshop
+                .scene
+                .get(pose.node)
+                .and_then(|n| n.parent)
+                .and_then(|p| view.entity(p))
+                .and_then(|e| parents.get(e).ok())
+                .map(|g| g.affine())
+                .unwrap_or_default();
+            transform.translation = parent.inverse().transform_point3(pose.at);
+        }
+        let Some((animation, flip)) = pose.animation else {
+            continue;
+        };
+        for mut rig in &mut sprite_rigs {
+            if rig.node == pose.node {
+                rig.playback = Some((animation.to_string(), flip, pose.seconds));
+            }
+        }
+        for mut rig in &mut rigs {
+            if rig.node == pose.node {
+                if rig
+                    .playback
+                    .as_ref()
+                    .is_none_or(|(name, _)| name != animation)
+                {
+                    rig.time = 0.0;
+                    rig.finished = false;
+                }
+                rig.playback = Some((animation.to_string(), 1.0));
+            }
+        }
+    }
 
     // Shown as its kind is: the animation, the node's entity and the camera following.
     let node = played.node;

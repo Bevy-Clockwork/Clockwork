@@ -277,6 +277,10 @@ pub enum Step {
         /// chosen by their record (a sign's type) name it here.
         #[serde(default)]
         animation: Option<Box<Template>>,
+        /// The `Behavior` output each placement does when played, picked like `item`: an
+        /// enemy's actor by its kind field.
+        #[serde(default)]
+        behavior: Option<Box<PlaceItem>>,
         /// What `MarkPlaces` writes into the cells: this field's value, else the record's number
         /// from 1.
         #[serde(default)]

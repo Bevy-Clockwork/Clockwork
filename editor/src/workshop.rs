@@ -529,6 +529,7 @@ fn add_scene(
         Vec3::ZERO,
     );
     let mut groups: HashMap<String, NodeId> = HashMap::new();
+    let mut behaviors = Vec::new();
     for node in &template.nodes {
         let parent = match &node.group {
             Some(group) => *groups
@@ -555,6 +556,18 @@ fn add_scene(
                 },
             )];
         }
+        if let Some(behavior) = &node.behavior {
+            behaviors.push((id, clockwork_core::asset::OutputRef::new(&plugin, behavior)));
+        }
+    }
+    // What a placement does follows its plugin's behavior asset (an enemy's actor).
+    for (id, at) in behaviors {
+        let next = state
+            .workshop
+            .scene
+            .get(id)
+            .map_or(0, |n| n.behaviors.len());
+        crate::asset_ui::link_behavior(state, id, next, Some(at));
     }
     state.workshop.select_only(root);
     root
@@ -804,7 +817,9 @@ pub fn scene_system(
                 continue;
             }
             if let Some(n) = by_id.get(&node.0) {
-                *transform = n.local_transform();
+                if !state.workshop.acting.contains(&node.0) {
+                    *transform = n.local_transform();
+                }
                 *vis = if state.workshop.hidden_in_play.contains(&node.0) {
                     Visibility::Hidden
                 } else {
@@ -872,6 +887,7 @@ fn behavior_shape_scale(behavior: &crate::entities::Behavior) -> Vec3 {
         Behavior::Target { .. } => Vec3::new(r, 1.6, r),
         Behavior::Pickup { .. } => Vec3::splat(r * 1.0),
         Behavior::Solid { .. } => Vec3::new(r, 1.2, r),
+        Behavior::Actor(_) => Vec3::new(r, 1.0, r),
         // A flat marker: these are mostly seen as rings, and invisible in play.
         Behavior::Trigger { .. }
         | Behavior::Checkpoint { .. }
@@ -1214,6 +1230,7 @@ mod tests {
                     fade: 0.6,
                 }),
                 animation: item.map(|_| "still".to_string()),
+                behavior: None,
             };
         let template = SceneTemplate {
             nodes: vec![

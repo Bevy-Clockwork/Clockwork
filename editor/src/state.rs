@@ -103,6 +103,8 @@ pub struct Workshop {
     pub debug: DebugView,
     /// Nodes destroyed or picked up while playing: hidden until play stops.
     pub hidden_in_play: std::collections::HashSet<NodeId>,
+    /// Nodes Play moves while it plays: actors (their scene transform waits until it stops).
+    pub acting: std::collections::HashSet<NodeId>,
     /// A message for the player and the seconds it still shows.
     pub toast: Option<(String, f32)>,
     /// The viewport gizmo's mode and whether it snaps.
@@ -242,6 +244,7 @@ impl Default for Workshop {
             play_clock: PlayClock::default(),
             debug: DebugView::default(),
             hidden_in_play: Default::default(),
+            acting: Default::default(),
             toast: None,
             tool: Default::default(),
             snap: false,

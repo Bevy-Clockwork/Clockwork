@@ -449,6 +449,11 @@ pub const STEPS: &[VariantInfo] = &[
                 "The animation each plays: (text, fields)",
             ),
             d(
+                "behavior",
+                Optional(&STRUCTURE),
+                "Which Behavior output each does when played (an enemy's Actor): (by, outputs, other)",
+            ),
+            d(
                 "code",
                 Optional(&STRUCTURE),
                 "The field MarkPlaces writes; the record's number without it",
@@ -687,7 +692,7 @@ pub const OUTPUTS: &[VariantInfo] = &[
     },
     VariantInfo {
         name: "Behavior",
-        about: "What a scene node does when played: Target(...), Pickup(...), Trigger(...), Checkpoint(...), Solid(...), Hazard(radius, damage) or Door(radius, to, fade).",
+        about: "What a scene node does when played: Target(...), Pickup(...), Trigger(...), Checkpoint(...), Solid(...), Hazard(radius, damage), Door(radius, to, fade) or Actor((health, radius, contact, speed, states: [...])), an enemy or NPC's state machine.",
         fields: &[
             f("id", Text, "Its id in the plugin"),
             f(

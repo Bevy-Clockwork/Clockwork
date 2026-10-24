@@ -1349,6 +1349,9 @@ fn entity_hint(kind: &str) -> &'static str {
         "Pickup" => "Gives an item when the player walks into it",
         "Trigger" => "Does something when the player walks into it",
         "Checkpoint" => "Where the player comes back after falling out of the world",
+        "Hazard" => "Hurts the player while it stands in it",
+        "Door" => "Takes the player to another node",
+        "Actor" => "Acts on its own: wanders, chases, hurts and can be beaten, state by state",
         _ => "Blocks movement",
     }
 }
@@ -1828,6 +1831,82 @@ fn behavior_editor(
             });
             drag(ui, "Fade (s)", fade, 0.0..=5.0);
         }
+        Behavior::Actor(actor) => actor_editor(ui, (id, k), actor, known),
+    }
+}
+
+/// An actor's numbers, and its states as RON (they are a small program: the agent writes them
+/// from the game's code, people adjust them here).
+fn actor_editor(
+    ui: &mut egui::Ui,
+    (id, k): (NodeId, usize),
+    actor: &mut clockwork_core::actor::Actor,
+    known: &[(String, String)],
+) {
+    let drag = |ui: &mut egui::Ui, label: &str, value: &mut f32, range| {
+        kit::prop(ui, label, |ui| {
+            ui.add(
+                egui::DragValue::new(value)
+                    .speed(0.05)
+                    .range(range)
+                    .max_decimals(2),
+            );
+        });
+    };
+    let mut hurtable = actor.health.is_some();
+    if ui.checkbox(&mut hurtable, "Can be beaten").changed() {
+        actor.health = hurtable.then_some(2.0);
+    }
+    if let Some(health) = &mut actor.health {
+        drag(ui, "Health", health, 0.25..=1000.0);
+    }
+    drag(ui, "Radius", &mut actor.radius, 0.1..=10.0);
+    drag(ui, "Speed (m/s)", &mut actor.speed, 0.0..=50.0);
+    drag(ui, "Contact damage", &mut actor.contact, 0.0..=100.0);
+    drag(ui, "Knockback (m)", &mut actor.knockback, 0.0..=10.0);
+    ui.checkbox(&mut actor.solid, "Blocks movement");
+    let mut drops = actor.drop.is_some();
+    if ui.checkbox(&mut drops, "Drops an item").changed() {
+        actor.drop = drops.then(|| (known.first().map_or(String::new(), |k| k.0.clone()), 1));
+    }
+    if let Some((item, count)) = &mut actor.drop {
+        item_picker(ui, &format!("actor_drop_{id}_{k}"), item, known);
+        kit::prop(ui, "Count", |ui| {
+            ui.add(egui::DragValue::new(count).range(1..=99));
+        });
+    }
+    // The text being typed is kept while it doesn't parse yet.
+    let key = egui::Id::new(("actor_states", id, k));
+    let written = ron::ser::to_string_pretty(&actor.states, ron::ser::PrettyConfig::default())
+        .unwrap_or_default();
+    let mut text: String = ui
+        .data_mut(|d| d.get_temp::<(String, String)>(key))
+        .filter(|(from, _)| *from == written)
+        .map_or_else(|| written.clone(), |(_, typed)| typed);
+    ui.label(RichText::new("States").strong());
+    let response = ui.add(
+        egui::TextEdit::multiline(&mut text)
+            .code_editor()
+            .desired_rows(8)
+            .desired_width(f32::INFINITY),
+    );
+    let parse = |text: &str| ron::from_str::<Vec<clockwork_core::actor::ActorState>>(text);
+    let mut from = written;
+    if response.changed()
+        && let Ok(states) = parse(&text)
+    {
+        actor.states = states;
+        from = ron::ser::to_string_pretty(&actor.states, Default::default()).unwrap_or_default();
+    }
+    // Typed text that isn't kept yet says why.
+    if text != from
+        && let Err(why) = parse(&text)
+    {
+        ui.colored_label(theme::WARN, why.to_string());
+    }
+    ui.data_mut(|d| d.insert_temp(key, (from, text)));
+    for problem in actor.problems() {
+        ui.colored_label(theme::WARN, problem);
     }
 }
 
