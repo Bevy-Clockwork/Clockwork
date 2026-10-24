@@ -769,6 +769,12 @@ screen's layout (plugins on the left, the selected one on the right):
   draws a numbered, dashed path from each step to the next, through the closed groups that hold
   them (`editor/src/recipe_graph/order.rs`). With nothing selected the Inspector lists the steps
   in the order they run; dragging one by its handle onto another makes it run there.
+- **Picked, not typed:** a Read's Inspector has *Pick the offset in the ROM*, the ROM's bytes
+  around its offset with the bytes it reads highlighted; clicking a byte reads from there. A
+  Crop's region is drawn by dragging on the image it crops. The add menu offers every kind of
+  output the schema describes: those without a written template start from a built-in asset
+  of their kind or default values (`clockwork_core::asset::starter`), or from their fields'
+  defaults.
 - **Changes are kept per plugin** while others are shown; a plugin with changes that aren't
   saved has a ● in the list (and the Plugins tab one too), and quitting (the window or
   File → Quit) asks first. A plugin file changed on disk (the agent) is loaded again while there
