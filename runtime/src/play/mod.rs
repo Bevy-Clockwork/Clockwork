@@ -6,8 +6,10 @@
 //! [`Play`] steps at a fixed rate ([`STEP`]), so a game plays the same whatever the frame rate.
 
 pub mod actors;
+pub mod check;
 pub mod entities;
 pub mod fighter;
+pub mod playtest;
 pub mod script;
 pub mod world;
 

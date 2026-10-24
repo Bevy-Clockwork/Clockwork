@@ -324,6 +324,7 @@ packs and existing plugins.
 | Decomp | `decomp_sync` (shallow `git clone` into `<data>/decomps/`), `decomp_list`, `decomp_search` (regex), `decomp_read` |
 | Knowledge | `recipe_guide`, `list_knowledge`, `read_knowledge`, `list_plugins`, `read_plugin` |
 | Results | `run_recipe` (summary + image previews the agent can see), `save_plugin` (runs the recipe first), `edit_plugin` (changes a saved recipe a step at a time, keeping its comments; runs it first) |
+| Play-testing | `play_test` (plays a Scene output from a script of inputs, headless, and reports what happened) |
 | External programs | `list_external_tools` |
 
 **The Library is shared** with the editor through `library.ron` (`clockwork_library::catalog`):
@@ -511,6 +512,16 @@ WASD or arrows, Shift to walk, Space to jump, Escape or *Stop* to end.
   winning). The editor's `play.rs` only hands it the scene and the extracted content and shows
   the result (rigs, camera, HUD, log), so an exported player or a headless test can drive the
   same game.
+- **Play-tests:** `clockwork_runtime::play::playtest` plays a scene from a script instead of a
+  player: each step holds the stick one way or towards a node (until it is reached) and holds
+  buttons for so many seconds, at the fixed step, so a script always plays the same way. Its
+  `Report` lists what happened and when (with what hurt the player, nodes gone and actors'
+  state changes), how each step ended or where it got stuck, the end (position, health, lives,
+  items, won or game over) and the nodes never reached or still standing. The agent's
+  `play_test` tool sets up a plugin's Scene output as the Workshop places it (its images with
+  surface maps as areas, models with collision as 3D areas, doors and behavior assets), plays a
+  character through it and returns the report, so an agent can check its own plugin. The names
+  check Play runs at the start (`play::check`) is shared with it.
 
 ### 7.7 Sprites and 2D characters (implemented)
 

@@ -27,6 +27,10 @@ notes so the next extraction is faster (tell the user; you can't write knowledge
 replace, move or remove a step or output, write a step's note) instead of saving the whole \
 recipe again: it keeps the recipe's comments and layout, runs the result and only saves it \
 if it works. Notes (// lines right above a step) are what the user reads in the editor.
+7. A plugin with a Scene output can be played without the user: play_test walks a character \
+through it from a script and reports what happened (see \"Play-testing a scene\" in \
+recipe_guide). Use it to check your own work: the player reaches the goal, doors lead \
+somewhere, enemies hurt and can be beaten, nothing that should be reachable is out of reach.
 
 Tools for external programs (git, Ghidra, …) live in their own folder; list_external_tools \
 shows what is available.";
@@ -542,6 +546,35 @@ too, into their own plugin `my-game` to change them there.
   quickest way to learn what a code means.
 - zoom: {image: "area", x: 400, y: 300, w: 220, h: 160} shows that rectangle enlarged; combine
   it with surfaces to inspect cells closely.
+
+## Play-testing a scene (play_test)
+
+play_test plays a Scene output the way the Workshop's Play mode would, without a window, at
+Play's fixed 1/60 s step: the same script always plays the same way. The scene's images with
+surface maps are its floors (16 px a meter, centered on their node) and its models with
+collision its 3D areas; doors and behavior assets of placements work as in Play.
+
+- `plugin` (saved) or `recipe` (+ `game`, or `plugin` for an edit not saved yet), `scene`
+  (default the first), `character` ("plugin/output" of a sprite or model with `character`:
+  another plugin's Link works in this plugin's rooms), `start` (a node's name or [x, y, z]),
+  `rules` ("plugin/output" or RON, e.g. `(lives: Some(3), goal: Some(Reach("Exit")))`), `act`.
+- `nodes`: behaviors added for this play, to scene nodes by name or to new nodes with `at`:
+  `{"name": "Chest", "behaviors": ["Pickup(item: \"key\", count: 1, radius: 0.5)"]}` or
+  `{"name": "Goal", "at": [12, 0, 4], "behaviors": []}` (a point to reach).
+- `script`: steps, each `{"hold": [dx, dz], "seconds": 2}` ([1, 0] east, [0, 1] south, down the
+  map), `{"toward": "Octorok"}` (straight at a node, an actor where it is now, until reached or
+  `seconds`, default 10), `{"seconds": 1}` (stand still), with `"walk": true` and `"press":
+  ["a"]` (pressed as the step starts and held through it; "jump", "a", "b", "dodge"; a 0.1 s
+  step is a tap). At most 600 s in all.
+
+The report lists events with their time and step (items got, nodes gone, "hurt by
+\"Octorok\"", doors and where they led, actors changing state, sounds, dialogs, problems),
+how each step ended (reached, how close it came, "stuck at" a wall for half a second), the end
+(position, health, lives, items carried, won or game over: play stops there) and the nodes
+never reached (pickups, doors, triggers, checkpoints) and still standing (targets, actors that
+can be beaten), with how close the player came. Content problems come first: names that lead
+nowhere, a start that isn't on a floor, behaviors that don't resolve. A toward step that gets
+stuck usually means a wall in the surface map or a node placed off its room.
 
 ## Graphics that change at runtime
 

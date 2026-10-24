@@ -64,7 +64,7 @@ impl Default for OrbitCamera {
 }
 
 /// GBA games are pixel art on a 16-pixel grid: one tile is one meter.
-const GBA_SCALE: f32 = 16.0;
+const GBA_SCALE: f32 = clockwork_recipe::IMAGE_PIXELS_PER_METER;
 
 /// Recipe results, by plugin name. Recipes run in the background when a node first needs them.
 #[derive(Resource, Default)]
@@ -308,30 +308,9 @@ pub fn extraction_system(mut state: ResMut<EditorState>, mut extractions: ResMut
     }
 }
 
-/// The surface map covering an output image exactly, if there is one: the one that names the
-/// image, else (for maps that name none) one of the same size.
+/// The surface map covering an output image exactly, if there is one.
 pub fn surfaces_for<'a>(extracted: &'a Extracted, output: &str) -> Option<&'a SurfaceMap> {
-    let (_, image) = extracted.images.iter().find(|(id, _)| id == output)?;
-    let named = |id: &str| {
-        extracted
-            .surface_images
-            .iter()
-            .find(|(surface, _)| surface == id)
-            .map(|(_, image)| image.as_str())
-    };
-    if let Some((_, map)) = extracted
-        .surfaces
-        .iter()
-        .find(|(id, _)| named(id) == Some(output))
-    {
-        return Some(map);
-    }
-    extracted
-        .surfaces
-        .iter()
-        .filter(|(id, _)| named(id).is_none())
-        .map(|(_, map)| map)
-        .find(|m| m.width * m.cell_size == image.width && m.height * m.cell_size == image.height)
+    extracted.surfaces_for(output)
 }
 
 /// A scene node's entity.

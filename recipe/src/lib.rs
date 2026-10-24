@@ -233,7 +233,37 @@ pub struct ExtractedSprite {
     pub character: Option<clockwork_core::character2d::Character2d>,
 }
 
+/// How many pixels of an image output make a meter where it lies on the ground as an area:
+/// one 16-pixel tile is one meter.
+pub const IMAGE_PIXELS_PER_METER: f32 = 16.0;
+
 impl Extracted {
+    /// The surface map covering an output image exactly, if there is one: the one that names
+    /// the image, else (for maps that name none) one of the same size.
+    pub fn surfaces_for(&self, output: &str) -> Option<&SurfaceMap> {
+        let (_, image) = self.images.iter().find(|(id, _)| id == output)?;
+        let named = |id: &str| {
+            self.surface_images
+                .iter()
+                .find(|(surface, _)| surface == id)
+                .map(|(_, image)| image.as_str())
+        };
+        if let Some((_, map)) = self
+            .surfaces
+            .iter()
+            .find(|(id, _)| named(id) == Some(output))
+        {
+            return Some(map);
+        }
+        self.surfaces
+            .iter()
+            .filter(|(id, _)| named(id).is_none())
+            .map(|(_, map)| map)
+            .find(|m| {
+                m.width * m.cell_size == image.width && m.height * m.cell_size == image.height
+            })
+    }
+
     pub fn sprite(&self, id: &str) -> Option<&ExtractedSprite> {
         self.sprites.iter().find(|s| s.id == id)
     }

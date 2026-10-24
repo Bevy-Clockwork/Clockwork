@@ -4,8 +4,10 @@ use std::fmt::Write;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use bevy::math::{Vec2, Vec3};
 use clockwork_core::recipe::Codec;
-use clockwork_recipe::edit;
+use clockwork_recipe::{Plugin, edit};
+use clockwork_runtime::play::playtest as script;
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -19,7 +21,7 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use crate::tools::{decomp, knowledge, recipe, rom};
+use crate::tools::{decomp, knowledge, playtest, recipe, rom};
 use crate::{external, guide, presence::Presence, workspace::Workspace};
 
 type ToolResult = Result<CallToolResult, McpError>;
@@ -291,6 +293,111 @@ impl EditArg {
     }
 }
 
+#[derive(Deserialize, JsonSchema)]
+pub struct PlayTestArgs {
+    /// A saved plugin, from list_plugins: its recipe runs on its game's ROM.
+    pub plugin: Option<String>,
+    /// A recipe to try before saving it (the whole recipe.ron text): `plugin`'s, or one that
+    /// runs on `game`.
+    pub recipe: Option<String>,
+    /// The game an unsaved recipe runs on, when it isn't `plugin`'s.
+    pub game: Option<String>,
+    /// The Scene output to play; default the first.
+    pub scene: Option<String>,
+    /// The played character, "plugin/output" (or an output of this plugin): a sprite or model
+    /// with `character`. Default: the first playable one the scene shows, else the plugin's
+    /// first.
+    pub character: Option<String>,
+    /// Where it starts: a node's name, or [x, y, z] in meters (x east, z south). Default: its
+    /// node in the scene, else a 3D area's start point, else the first area's center.
+    pub start: Option<StartArg>,
+    /// "plugin/output" of a Rules or Game output, or Rules in RON, e.g.
+    /// "(lives: Some(3), goal: Some(Reach(\"Exit\")))". Default: the plugin's own Game or
+    /// Rules output, else the built-in rules (no goal).
+    pub rules: Option<String>,
+    /// The act played (from 1); default none, every node there.
+    pub act: Option<u8>,
+    /// Behaviors to give scene nodes for this play, or new nodes (with `at`): a goal, a key,
+    /// an enemy to try.
+    pub nodes: Option<Vec<NodeArg>>,
+    /// What the player does, step after step.
+    pub script: Vec<StepArg>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum StartArg {
+    Node(String),
+    At([f32; 3]),
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct NodeArg {
+    /// A scene node's name, or a new node's.
+    pub name: String,
+    /// Where it stands, [x, y, z] in meters; moves a scene node, needed for a new one.
+    pub at: Option<[f32; 3]>,
+    /// Each "plugin/output" of a Behavior output, or a behavior in RON, e.g.
+    /// "Pickup(item: \"key\", count: 1, radius: 0.5)" or "(behavior: Hazard(radius: 1.0,
+    /// damage: 1.0), when: Some(Flag(\"lava\")))".
+    #[serde(default)]
+    pub behaviors: Vec<String>,
+}
+
+/// One step of the script. Without `hold` or `toward` the stick is let go.
+#[derive(Deserialize, JsonSchema)]
+pub struct StepArg {
+    /// The stick on the ground, [dx, dz]: [1, 0] east, [0, 1] south (down the map), [0, -1]
+    /// north. Length 1 is pushed all the way.
+    pub hold: Option<[f32; 2]>,
+    /// Walk straight towards the node of this name (an actor where it is now); the step ends
+    /// when it is reached.
+    pub toward: Option<String>,
+    /// How long the step lasts. Default 1, or 10 for `toward` (its time limit).
+    pub seconds: Option<f32>,
+    /// Hold the walk button (slower). Default false.
+    pub walk: Option<bool>,
+    /// Buttons pressed as the step starts and held through it: "jump", "a", "b", "dodge". A
+    /// short step (0.1 s) is a tap.
+    pub press: Option<Vec<String>>,
+}
+
+impl StepArg {
+    fn step(self) -> Result<script::Step, String> {
+        let hold = match (self.hold, self.toward) {
+            (Some(_), Some(_)) => return Err("A step has `hold` or `toward`, not both".into()),
+            (Some([x, z]), None) => script::Hold::Direction(Vec2::new(x, z)),
+            (None, Some(name)) => script::Hold::Toward(name),
+            (None, None) => script::Hold::Still,
+        };
+        let buttons = self
+            .press
+            .unwrap_or_default()
+            .iter()
+            .map(|b| match b.to_lowercase().as_str() {
+                "jump" => Ok(script::Button::Jump),
+                "a" => Ok(script::Button::A),
+                "b" => Ok(script::Button::B),
+                "dodge" => Ok(script::Button::Dodge),
+                other => Err(format!(
+                    "No button \"{other}\"; use \"jump\", \"a\", \"b\" or \"dodge\""
+                )),
+            })
+            .collect::<Result<_, _>>()?;
+        let default = if matches!(hold, script::Hold::Toward(_)) {
+            10.0
+        } else {
+            1.0
+        };
+        Ok(script::Step {
+            hold,
+            seconds: self.seconds.unwrap_or(default),
+            walk: self.walk.unwrap_or(false),
+            buttons,
+        })
+    }
+}
+
 #[derive(Clone)]
 pub struct Clockwork {
     workspace: Arc<Mutex<Workspace>>,
@@ -362,6 +469,96 @@ impl Clockwork {
             let entry = ws.find(game)?;
             ws.rom(&entry)
         })
+    }
+
+    /// The ROM a saved plugin runs on: the first of its games in the Library.
+    fn plugin_rom(&self, plugin: &Plugin) -> Result<Arc<Vec<u8>>, String> {
+        let game = plugin
+            .manifest
+            .source
+            .sha1
+            .iter()
+            .find(|sha1| self.workspace().find(sha1).is_ok())
+            .ok_or_else(|| {
+                format!(
+                    "The game of plugin \"{}\" isn't in the Library",
+                    plugin.name()
+                )
+            })?
+            .clone();
+        self.rom_of(&game)
+    }
+
+    /// Plays a scene from a script (see [`playtest`]).
+    fn run_play_test(&self, a: PlayTestArgs) -> Result<String, String> {
+        let installed: Vec<Plugin> = recipe::plugins().into_iter().flatten().collect();
+        let rom = |p: &Plugin| self.plugin_rom(p).map(|rom| rom.as_ref().clone());
+        let other = |name: &str| {
+            installed
+                .iter()
+                .find(|p| p.name() == name)
+                .ok_or_else(|| format!("No plugin named \"{name}\"; see list_plugins"))?
+                .extract(&installed, &rom)
+                .map_err(|e| format!("{name}: {e}"))
+        };
+        let saved = a.plugin.as_deref().map(recipe::find_plugin).transpose()?;
+        let edited = a.recipe.as_deref().map(recipe::parse).transpose()?;
+        let name = a.plugin.clone().unwrap_or_else(|| "draft".into());
+        let owned = clockwork_recipe::assets::OwnedAssets::of(&installed);
+        // The played recipe: the one given, else the saved plugin's.
+        let recipe = match (edited, &saved) {
+            (Some(parsed), _) => parsed,
+            (None, Some(plugin)) => plugin.recipe.clone(),
+            (None, None) => {
+                return Err("Name a `plugin`, or give a `recipe` and its `game`".into());
+            }
+        };
+        let assets = owned.with_recipe(&name, &recipe);
+        let extracted = match (&a.recipe, &a.game, &saved) {
+            (None, _, Some(plugin)) => plugin.extract(&installed, &rom)?,
+            (Some(_), Some(game), _) => {
+                clockwork_recipe::run_in(&recipe, &self.rom_of(game)?, &assets)
+                    .map_err(|e| format!("Recipe failed: {e}"))?
+            }
+            (Some(_), None, Some(plugin)) => {
+                clockwork_recipe::run_in(&recipe, &self.plugin_rom(plugin)?, &assets)
+                    .map_err(|e| format!("Recipe failed: {e}"))?
+            }
+            _ => return Err("A recipe needs `game` or `plugin`".into()),
+        };
+        let request = playtest::Request {
+            scene: a.scene,
+            character: a.character,
+            start: a.start.map(|s| match s {
+                StartArg::Node(name) => playtest::Start::Node(name),
+                StartArg::At(at) => playtest::Start::At(Vec3::from(at)),
+            }),
+            rules: a.rules,
+            act: a.act,
+            nodes: a
+                .nodes
+                .unwrap_or_default()
+                .into_iter()
+                .map(|n| playtest::Extra {
+                    name: n.name,
+                    at: n.at.map(Vec3::from),
+                    behaviors: n.behaviors,
+                })
+                .collect(),
+            steps: a
+                .script
+                .into_iter()
+                .map(StepArg::step)
+                .collect::<Result<_, _>>()?,
+        };
+        let content = playtest::Content {
+            plugin: &name,
+            outputs: &recipe.outputs,
+            extracted: &extracted,
+            assets: &assets,
+            other: &other,
+        };
+        playtest::run(&content, &request)
     }
 }
 
@@ -673,6 +870,21 @@ impl Clockwork {
             Err(e) => content.push(ContentBlock::text(format!("No preview: {e}"))),
         }
         Ok(CallToolResult::success(content))
+    }
+
+    #[tool(
+        description = "Play a plugin's Scene output without a window: a character goes \
+                          through it following a script of inputs (hold a direction or walk \
+                          toward a node, press buttons, for so many seconds) at Play's fixed \
+                          step. Returns what happened and when (pickups, hurts and by what, \
+                          doors, actors changing state, nodes beaten or taken, won or game \
+                          over), where each step ended or got stuck, health, lives and items \
+                          at the end, and what was never reached. The same script always \
+                          plays the same way: use it to check that a scene plays as it should."
+    )]
+    async fn play_test(&self, args: Parameters<PlayTestArgs>) -> ToolResult {
+        self.track("play_test");
+        reply(blocking(|| self.run_play_test(args.0)))
     }
 
     #[tool(

@@ -38,6 +38,11 @@
 - `frames` on area images and their layers: animated tiles (water, lava, flowers) as images
   shown in turn, each for its ticks. The Workshop and Play animate them; `run_recipe` previews
   an area with all its layers.
+- `play_test` agent tool: plays a plugin's Scene output without a window from a script of
+  inputs (hold a direction or walk toward a node, press buttons, for so many seconds) and
+  reports what happened and when, how each step ended or got stuck, the end (health, lives,
+  items, won or game over) and what was never reached. Behaviors and nodes can be added for
+  the test. The same script always plays the same way.
 
 ### Fixed
 
