@@ -80,6 +80,8 @@ impl PluginEditor {
 pub enum Tab {
     #[default]
     Recipe,
+    /// The recipe as text.
+    Text,
     Provides,
 }
 
@@ -360,7 +362,7 @@ pub fn plugin_editor_screen(
     }
     if let Some(plugin) = selected
         .as_ref()
-        .filter(|_| state.plugin_editor.tab == Tab::Recipe)
+        .filter(|_| matches!(state.plugin_editor.tab, Tab::Recipe | Tab::Text))
     {
         egui::CentralPanel::default()
             .frame(canvas)
@@ -428,6 +430,11 @@ fn view_header(
                         tab,
                         &[
                             (Tab::Recipe, "Recipe", "Edit the recipe as a node graph"),
+                            (
+                                Tab::Text,
+                                "Text",
+                                "Edit recipe.ron as text, comments and all",
+                            ),
                             (Tab::Provides, "Provides", "What the plugin gives you"),
                         ],
                     );
@@ -920,13 +927,16 @@ fn recipe_view(ui: &mut egui::Ui, state: &mut EditorState, plugin: &Plugin) {
     if tidy {
         graph.arrange();
     }
+    let text = state.plugin_editor.tab == Tab::Text;
     egui::Frame::new()
         .inner_margin(egui::Margin::symmetric(12, 6))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 let (steps, outputs, _) = graph.status();
-                graph.nav.toolbar(ui, &name);
-                ui.add_space(8.0);
+                if !text {
+                    graph.nav.toolbar(ui, &name);
+                    ui.add_space(8.0);
+                }
                 ui.label(kit::hint(format!("{steps} steps · {outputs} outputs")));
                 if graph.running() {
                     ui.add_space(8.0);
@@ -934,10 +944,12 @@ fn recipe_view(ui: &mut egui::Ui, state: &mut EditorState, plugin: &Plugin) {
                         .on_hover_text("Nodes show the last run until this one is done");
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    key_hints(
-                        ui,
-                        &[("Space", "add"), ("Del", "remove"), ("Alt+↑↓", "reorder")],
-                    );
+                    if !text {
+                        key_hints(
+                            ui,
+                            &[("Space", "add"), ("Del", "remove"), ("Alt+↑↓", "reorder")],
+                        );
+                    }
                     // What is wrong goes in the room left, cut short; a click goes to it.
                     let problems = graph.problems();
                     if let Some((_, first)) = problems.first() {
@@ -972,10 +984,14 @@ fn recipe_view(ui: &mut egui::Ui, state: &mut EditorState, plugin: &Plugin) {
         }
     }
     ui.add_space(4.0);
-    let shown = graph.show(ui, &name);
-    // Arranging a recipe that had no saved layout is no change to save.
-    if shown.arranged && !dirty {
-        draft.saved_layout = graph.layout();
+    if text {
+        graph.show_text(ui, &name);
+    } else {
+        let shown = graph.show(ui, &name);
+        // Arranging a recipe that had no saved layout is no change to save.
+        if shown.arranged && !dirty {
+            draft.saved_layout = graph.layout();
+        }
     }
 
     match action {
@@ -1075,6 +1091,8 @@ pub enum GraphCommand {
     Ungroup(String),
     /// Groups the recipe again by its section comments (or, with `true`, by its outputs).
     GroupAutomatically(bool),
+    /// Shows the recipe as text (`true`) or as the graph.
+    ShowText(bool),
 }
 
 /// Runs a graph command on the plugin shown (it must have been drawn once, to be open).
@@ -1112,10 +1130,15 @@ pub fn script(state: &mut EditorState, command: &GraphCommand) -> Result<(), Str
             | GraphCommand::OpenGroup(_)
             | GraphCommand::CloseGroup(_)
             | GraphCommand::Ungroup(_)
-            | GraphCommand::GroupAutomatically(_) => {
+            | GraphCommand::GroupAutomatically(_)
+            | GraphCommand::ShowText(_) => {
                 return Err("this plugin is a composition".into());
             }
         }
+        return Ok(());
+    }
+    if let GraphCommand::ShowText(text) = command {
+        state.plugin_editor.tab = if *text { Tab::Text } else { Tab::Recipe };
         return Ok(());
     }
     let draft = state
@@ -1135,6 +1158,7 @@ pub fn script(state: &mut EditorState, command: &GraphCommand) -> Result<(), Str
         GraphCommand::OpenGroup(name) => graph.set_group_open(graph.group_named(name)?, true),
         GraphCommand::CloseGroup(name) => graph.set_group_open(graph.group_named(name)?, false),
         GraphCommand::Ungroup(name) => graph.ungroup(graph.group_named(name)?),
+        GraphCommand::ShowText(_) => {}
         GraphCommand::GroupAutomatically(by_outputs) => {
             graph.ungroup_all();
             graph.group_automatically(*by_outputs);
