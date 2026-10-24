@@ -4,7 +4,7 @@
 
 use bevy_egui::egui::{self, Color32, RichText, Stroke, vec2};
 use clockwork_core::{
-    asset::OutputRef,
+    asset::AssetId,
     surface::{SurfaceMap, SurfaceProperty},
 };
 use clockwork_runtime::hud::HudRequest;
@@ -1092,7 +1092,7 @@ fn inspector(
                     node_inspector(ui, state, id, extractions);
                 } else if let Some(at) = selected_asset(state, browser) {
                     crate::asset_ui::asset_section(ui, state, browser, &at);
-                    if let Some(index) = state.workshop.plugin_index(&at.plugin) {
+                    if let Some(index) = state.workshop.plugin_index(&at.at.plugin) {
                         ui.add_space(8.0);
                         plugin_inspector(ui, state, index, browser);
                     }
@@ -1110,10 +1110,9 @@ fn inspector(
 }
 
 /// The asset selected in the browser, while the Inspector shows its plugin (or it is built in).
-fn selected_asset(state: &EditorState, browser: &Browser) -> Option<OutputRef> {
-    let (plugin, output) = browser.selected.as_ref()?;
-    (state.workshop.plugin_index(plugin) == state.workshop.selected)
-        .then(|| OutputRef::new(plugin, output))
+fn selected_asset(state: &EditorState, browser: &Browser) -> Option<AssetId> {
+    let id = browser.selected.as_ref()?;
+    (state.workshop.plugin_index(&id.at.plugin) == state.workshop.selected).then(|| id.clone())
 }
 
 fn node_inspector(

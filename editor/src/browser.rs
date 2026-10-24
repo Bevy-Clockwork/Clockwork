@@ -18,7 +18,11 @@ use bevy_egui::{
     EguiContexts,
     egui::{self, Color32, RichText, Stroke, vec2},
 };
-use clockwork_core::{asset::OutputRef, image::RgbaImage, recipe::Kind};
+use clockwork_core::{
+    asset::{AssetId, OutputRef},
+    image::RgbaImage,
+    recipe::Kind,
+};
 use clockwork_recipe::{Extracted, Plugin, assets::AssetIndex, preview};
 
 use crate::{
@@ -66,6 +70,13 @@ impl Item {
     pub fn key(&self) -> (String, String) {
         (self.plugin_name.clone(), self.output.clone())
     }
+
+    pub fn id(&self) -> AssetId {
+        AssetId::new(
+            OutputRef::new(&self.plugin_name, &self.output),
+            self.asset_kind,
+        )
+    }
 }
 
 /// Which category tab is open.
@@ -99,9 +110,7 @@ pub struct Browser {
     /// Game filter: `None` shows all games.
     pub game: Option<String>,
     pub thumb_size: f32,
-    pub selected: Option<(String, String)>,
-    /// The kind of the selected asset, when known: an ability and a sprite may share a name.
-    pub selected_kind: Option<&'static str>,
+    pub selected: Option<AssetId>,
     /// Preview textures by (plugin name, output id).
     previews: HashMap<(String, String), egui::TextureHandle>,
     /// Plugins (by cache key) whose previews are loaded, being made, or failed.
@@ -127,7 +136,6 @@ impl Default for Browser {
             game: None,
             thumb_size: 96.0,
             selected: None,
-            selected_kind: None,
             previews: HashMap::new(),
             handled: HashSet::new(),
             failed: HashMap::new(),
@@ -638,10 +646,8 @@ pub fn content_panel(ui: &mut egui::Ui, state: &mut EditorState, browser: &mut B
     let enter =
         ui.input(|i| i.key_pressed(egui::Key::Enter)) && !ui.ctx().egui_wants_keyboard_input();
     if enter
-        && let Some((plugin_name, output)) = &browser.selected
-        && let Some(item) = all
-            .iter()
-            .find(|i| i.plugin_name == *plugin_name && i.output == *output)
+        && let Some(id) = &browser.selected
+        && let Some(item) = all.iter().find(|i| i.id() == *id)
         && let Some(plugin) = openable(item)
     {
         open_item = Some((plugin, item.output.clone()));
@@ -653,8 +659,8 @@ pub fn content_panel(ui: &mut egui::Ui, state: &mut EditorState, browser: &mut B
         crate::asset_ui::place_behavior(state, at);
     }
     // Selecting an item shows it, and its plugin, in the Inspector.
-    if clicked && let Some((plugin_name, _)) = &browser.selected {
-        state.workshop.selected = state.workshop.plugin_index(plugin_name);
+    if clicked && let Some(id) = &browser.selected {
+        state.workshop.selected = state.workshop.plugin_index(&id.at.plugin);
         state.workshop.selected_node = None;
     }
 }
@@ -665,8 +671,7 @@ fn card(ui: &mut egui::Ui, item: &Item, browser: &mut Browser) -> (bool, bool) {
     let (rect, response) =
         ui.allocate_exact_size(vec2(size, size + 34.0), egui::Sense::click_and_drag());
     let thumb = egui::Rect::from_min_size(rect.min, vec2(size, size));
-    let selected = browser.selected.as_ref() == Some(&item.key())
-        && browser.selected_kind.is_none_or(|k| k == item.asset_kind);
+    let selected = browser.selected.as_ref() == Some(&item.id());
     let painter = ui.painter();
 
     painter.rect_filled(thumb, 3.0, theme::BG_DEEP);
@@ -807,8 +812,7 @@ fn card(ui: &mut egui::Ui, item: &Item, browser: &mut Browser) -> (bool, bool) {
         }
     ));
     if response.clicked() || response.drag_started() {
-        browser.selected = Some(item.key());
-        browser.selected_kind = Some(item.asset_kind);
+        browser.selected = Some(item.id());
     }
     if item.ready
         && item.placeable
