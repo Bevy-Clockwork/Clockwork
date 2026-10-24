@@ -4,6 +4,8 @@
 
 ### Added
 
+- `behaviors` on `Places` steps: more `Behavior` outputs per placement, each picked like
+  `behavior`, so a placed person can talk and block the way, or a chest be solid and open.
 - Scripts: the effect `Run` starts commands that run over time (`Do`, `Wait`, `Until`, `Walk`,
   `Place`, `Hold`, `If`, `Repeat`, `End`), for cutscenes and events. A script can hold the
   player still, and nodes it walks take their behaviors along. The Inspector edits scripts, and

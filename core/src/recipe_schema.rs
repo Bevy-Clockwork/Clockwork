@@ -454,6 +454,11 @@ pub const STEPS: &[VariantInfo] = &[
                 "Which Behavior output each does when played (an enemy's Actor): (by, outputs, other)",
             ),
             d(
+                "behaviors",
+                Structure,
+                "More Behavior outputs each does, each picked like behavior: [(by, outputs, other)]",
+            ),
+            d(
                 "code",
                 Optional(&STRUCTURE),
                 "The field MarkPlaces writes; the record's number without it",
