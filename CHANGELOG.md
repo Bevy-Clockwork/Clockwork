@@ -4,6 +4,9 @@
 
 ### Added
 
+- `recipe_file` on the agent's `run_recipe`, `save_plugin` and `play_test` tools: a recipe
+  read from a file instead of sent in place, for recipes too large to send (a whole game world
+  generated from its tables).
 - `times` and `plus` on record fields: the number read is scaled, so records that keep
   positions in tiles (`x + y * 64`) place things in pixels without per-record origins.
 - `behaviors` on `Places` steps: more `Behavior` outputs per placement, each picked like
