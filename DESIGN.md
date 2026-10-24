@@ -503,6 +503,14 @@ WASD or arrows, Shift to walk, Space to jump, Escape or *Stop* to end.
 - **The scene is never changed:** the played node's entity moves, the scene doesn't, so
   stopping puts everything back and undo history is untouched.
 - The remote control can `Play`, `Stop`, hold a `Stick` direction and `Jump`.
+- **Runs without a window:** the simulation is `clockwork_runtime::play`: `Play` holds the
+  played character's body (`Avatar`: model, top-down or billboard), its fighting state, health,
+  the scene's behaviors (`Entities`, built from `Placed` nodes) and the rules, and
+  `Play::advance` plays one frame from the input (`Frame`) in the scene's areas and terrains
+  (`Level`), returning what happened (`Happened`: notices, sounds, dialogs, doors, going down,
+  winning). The editor's `play.rs` only hands it the scene and the extracted content and shows
+  the result (rigs, camera, HUD, log), so an exported player or a headless test can drive the
+  same game.
 
 ### 7.7 Sprites and 2D characters (implemented)
 

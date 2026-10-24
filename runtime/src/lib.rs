@@ -8,6 +8,7 @@ pub mod controller;
 pub mod hud;
 pub mod input;
 pub mod inventory;
+pub mod play;
 pub mod projectiles;
 pub mod retro_material;
 pub mod terrain;

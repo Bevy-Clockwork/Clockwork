@@ -125,6 +125,11 @@ impl FlowState {
         }
     }
 
+    /// Whether the game has its own game over screen.
+    pub fn has_game_over(&self) -> bool {
+        self.flow.as_ref().is_some_and(|f| f.game_over.is_some())
+    }
+
     /// Out of lives: the game over screen, if the game has one.
     pub fn game_over(&mut self) -> bool {
         if self.flow.as_ref().is_some_and(|f| f.game_over.is_some()) {
@@ -304,7 +309,9 @@ fn give(save: &SaveData, session: &mut PlaySession) {
             inventory.add(item, *count);
         }
     }
-    let entities = session.entities_mut();
+    let Some(entities) = session.entities_mut() else {
+        return;
+    };
     entities.flags = save.flags.clone();
     let gone: Vec<_> = entities
         .nodes
