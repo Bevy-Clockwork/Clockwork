@@ -43,6 +43,7 @@ use crate::{
     kit, theme,
 };
 
+mod blocks;
 mod groups;
 
 use groups::{GNode, GroupId, GroupInfo, SavedGroup};
@@ -626,6 +627,8 @@ pub enum Edit {
     Wire(String, String, String, String),
     /// Adds a step or output from its template, by variant name: `Add("Crop")`.
     Add(String),
+    /// Adds a block of steps as a closed group, by its name: `AddBlock("GBA tileset")`.
+    AddBlock(String),
     Remove(String),
     /// Runs a step later (`true`) or earlier; moves an output down or up.
     Move(String, bool),
@@ -684,6 +687,9 @@ enum Change {
         /// Its first output of the input's kind feeds this input.
         feed: Option<(RNode, usize)>,
     },
+    /// Adds a block (an index into [`blocks::BLOCKS`]): its steps after the selected step (or
+    /// last), its outputs last, all in a new closed group at `at`.
+    AddBlock { block: usize, at: Pos2 },
     /// Removes these steps and outputs.
     Remove(Vec<RNode>),
     /// Swaps a step or output with the one after it (`later`) or before it.
@@ -1435,6 +1441,73 @@ impl RecipeGraph {
                 focus = Some(node);
                 doc.text
             }
+            Change::AddBlock { block, at } => {
+                let block = blocks::BLOCKS.get(block).ok_or("no such block")?;
+                let (steps, outputs) = block.named(&self.taken_names());
+                let group = self.groups.keys().max().map_or(1, |m| m + 1);
+                let first = self.insert_index(true).unwrap_or(self.recipe.steps.len());
+                let mut doc = self.doc.clone();
+                let mut added = Vec::new();
+                for (list, items, start) in [
+                    ("steps", &steps, first),
+                    ("outputs", &outputs, self.recipe.outputs.len()),
+                ] {
+                    for (i, item) in items.iter().enumerate() {
+                        let seq = doc
+                            .root
+                            .field(list)
+                            .ok_or(format!("the recipe has no {list} list"))?;
+                        let place = start + i;
+                        doc = Doc::parse(doc.inserted(seq, place, item))
+                            .map_err(|e| e.to_string())?;
+                        let node = if list == "steps" {
+                            RNode::Step(place)
+                        } else {
+                            RNode::Output(place)
+                        };
+                        places = remap(places, |n| Some(shifted(n, node)));
+                        added.push(node);
+                    }
+                }
+                for (i, node) in added.iter().enumerate() {
+                    let exposed = block
+                        .shown
+                        .iter()
+                        .filter(|(step, _)| *step == i && matches!(node, RNode::Step(_)))
+                        .map(|(_, field)| field.to_string())
+                        .collect();
+                    places.insert(
+                        *node,
+                        Place {
+                            group: Some(group),
+                            exposed,
+                            ..Place::at(at)
+                        },
+                    );
+                }
+                let taken: HashSet<&str> = self.groups.values().map(|g| g.name.as_str()).collect();
+                let name = (1..)
+                    .map(|n| match n {
+                        1 => block.name.to_string(),
+                        n => format!("{} {n}", block.name),
+                    })
+                    .find(|n| !taken.contains(n.as_str()))
+                    .unwrap_or_default();
+                self.groups.insert(
+                    group,
+                    GroupInfo {
+                        name,
+                        parent: None,
+                        open: false,
+                        pos: at,
+                        laid_out: false,
+                    },
+                );
+                self.grouped = true;
+                self.focus_group = Some(group);
+                focus = None;
+                doc.text
+            }
             Change::Remove(mut nodes) => {
                 // Last first, so the places of the others don't change.
                 nodes.sort_by_key(|n| std::cmp::Reverse(order(*n)));
@@ -1524,7 +1597,11 @@ impl RecipeGraph {
             }
         };
         let before = self.doc.text.clone();
-        self.set_text(&text, places)?;
+        if let Err(e) = self.set_text(&text, places) {
+            // A block's group, made before its text was.
+            self.prune_groups();
+            return Err(e);
+        }
         self.focus = focus.filter(|node| self.ports.contains_key(node));
         let merge = field.is_some() && field == self.last_field;
         if !merge {
@@ -1536,6 +1613,16 @@ impl RecipeGraph {
         self.redo.clear();
         self.last_field = field;
         Ok(())
+    }
+
+    /// A place below everything drawn.
+    fn below_everything(&self) -> Pos2 {
+        let below = self
+            .snarl
+            .nodes_pos_ids()
+            .map(|(id, pos, _)| pos.y + self.sizes.get(&id).map_or(ROW, |size| size.y))
+            .fold(0.0, f32::max);
+        pos2(0.0, below + GAP)
     }
 
     fn list_len(&self, node: RNode) -> usize {
@@ -1677,6 +1764,16 @@ impl RecipeGraph {
                     to: (to, inp),
                 }
             }
+            Edit::AddBlock(name) => {
+                let block = blocks::BLOCKS
+                    .iter()
+                    .position(|b| b.name == name)
+                    .ok_or_else(|| format!("there is no block called {name}"))?;
+                Change::AddBlock {
+                    block,
+                    at: self.below_everything(),
+                }
+            }
             Edit::Add(variant) => {
                 let (template, step) = STEP_TEMPLATES
                     .iter()
@@ -1689,16 +1786,10 @@ impl RecipeGraph {
                             .map(|(_, t)| (*t, false))
                     })
                     .ok_or_else(|| format!("there is no step or output called {variant}"))?;
-                // Below everything drawn.
-                let below = self
-                    .snarl
-                    .nodes_pos_ids()
-                    .map(|(id, pos, _)| pos.y + self.sizes.get(&id).map_or(ROW, |size| size.y))
-                    .fold(0.0, f32::max);
                 Change::Add {
                     template: template.to_string(),
                     step,
-                    at: pos2(0.0, below + GAP),
+                    at: self.below_everything(),
                     index: None,
                     read: None,
                     feed: None,
@@ -2016,20 +2107,27 @@ impl RecipeGraph {
                 .show(ui.ctx(), |ui| {
                     egui::Frame::popup(ui.style()).show(ui, |ui| {
                         ui.set_width(320.0);
-                        ui.label(kit::hint("Add a step or output"));
-                        add_list(ui, &mut self.add_query, |_, _| true)
+                        ui.label(kit::hint("Add a step, an output or a block"));
+                        add_list(ui, &mut self.add_query, true, |_, _| true)
                     })
                 });
-            if let Some((template, step)) = area.inner.inner {
-                changes.push(Change::Add {
-                    template,
-                    step,
-                    at,
-                    index: self.insert_index(step),
-                    read: None,
-                    feed: None,
-                });
-                close = true;
+            match area.inner.inner {
+                Some(Picked::Template(template, step)) => {
+                    changes.push(Change::Add {
+                        template,
+                        step,
+                        at,
+                        index: self.insert_index(step),
+                        read: None,
+                        feed: None,
+                    });
+                    close = true;
+                }
+                Some(Picked::Block(block)) => {
+                    changes.push(Change::AddBlock { block, at });
+                    close = true;
+                }
+                None => {}
             }
             if close || area.response.clicked_elsewhere() {
                 self.add_at = None;
@@ -3378,16 +3476,29 @@ fn value_row(
     ty: FieldType,
     text: &str,
 ) -> Option<String> {
+    labeled_value_row(ui, &key.1, edits, key, about, ty, text)
+}
+
+/// A [`value_row`] under another label than the field's name.
+fn labeled_value_row(
+    ui: &mut Ui,
+    label: &str,
+    edits: &mut HashMap<(RNode, String), String>,
+    key: &(RNode, String),
+    about: Option<&FieldInfo>,
+    ty: FieldType,
+    text: &str,
+) -> Option<String> {
     let block = matches!(ty, FieldType::Structure)
         || matches!(ty, FieldType::Optional(FieldType::Structure)) && text != "None";
     if block {
-        let label = ui.label(kit::dim(&key.1));
+        let label = ui.label(kit::dim(label));
         if let Some(about) = about {
             label.on_hover_text(about.about);
         }
         edit_value(ui, edits, key, ty, text)
     } else {
-        kit::prop(ui, &key.1, |ui| edit_value(ui, edits, key, ty, text))
+        kit::prop(ui, label, |ui| edit_value(ui, edits, key, ty, text))
     }
 }
 
@@ -3552,11 +3663,20 @@ fn thumb(
 
 /// The steps and outputs that can be added (those `filter` takes by the kinds they read and
 /// make), found by typing; the template and whether it is a step, once one is picked.
+/// What was picked in [`add_list`].
+enum Picked {
+    /// A step (`true`) or output template.
+    Template(String, bool),
+    /// An index into [`blocks::BLOCKS`].
+    Block(usize),
+}
+
 fn add_list(
     ui: &mut Ui,
     query: &mut String,
+    with_blocks: bool,
     filter: impl Fn(&[NameKind], &[NameKind]) -> bool,
-) -> Option<(String, bool)> {
+) -> Option<Picked> {
     let field = ui.add(
         egui::TextEdit::singleline(query)
             .hint_text(kit::hint("🔍 Search, Enter adds the first"))
@@ -3574,6 +3694,46 @@ fn add_list(
         .auto_shrink([false, true])
         .show(ui, |ui| {
             ui.style_mut().interaction.selectable_labels = false;
+            let choice = |ui: &mut Ui, name: &str, about: &str| {
+                let response = ui
+                    .scope_builder(egui::UiBuilder::new().sense(egui::Sense::click()), |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.label(RichText::new(name).strong().color(theme::PARCHMENT));
+                        ui.label(RichText::new(about).small().color(theme::PARCHMENT_DIM));
+                    })
+                    .response;
+                if response.hovered() {
+                    ui.painter().rect_stroke(
+                        response.rect.expand(2.0),
+                        4.0,
+                        Stroke::new(1.0, theme::BRASS_DIM),
+                        egui::StrokeKind::Outside,
+                    );
+                }
+                ui.add_space(2.0);
+                response.clicked()
+            };
+            let blocks: Vec<usize> = (0..blocks::BLOCKS.len())
+                .filter(|_| with_blocks)
+                .filter(|&b| {
+                    let block = &blocks::BLOCKS[b];
+                    q.is_empty()
+                        || block.name.to_lowercase().contains(&q)
+                        || block.about.to_lowercase().contains(&q)
+                })
+                .collect();
+            if !blocks.is_empty() {
+                ui.label(RichText::new("Blocks").small().color(theme::BRASS));
+            }
+            for b in blocks {
+                let block = &blocks::BLOCKS[b];
+                if first.is_none() {
+                    first = Some(Picked::Block(b));
+                }
+                if choice(ui, block.name, block.about) {
+                    picked = Some(Picked::Block(b));
+                }
+            }
             for (heading, templates, step) in [
                 ("Steps", STEP_TEMPLATES, true),
                 ("Outputs", OUTPUT_TEMPLATES, false),
@@ -3600,27 +3760,11 @@ fn add_list(
                 ui.label(RichText::new(heading).small().color(theme::BRASS));
                 for (name, template, about) in matching {
                     if first.is_none() {
-                        first = Some((template.to_string(), step));
+                        first = Some(Picked::Template(template.to_string(), step));
                     }
-                    let response = ui
-                        .scope_builder(egui::UiBuilder::new().sense(egui::Sense::click()), |ui| {
-                            ui.set_width(ui.available_width());
-                            ui.label(RichText::new(name).strong().color(theme::PARCHMENT));
-                            ui.label(RichText::new(about).small().color(theme::PARCHMENT_DIM));
-                        })
-                        .response;
-                    if response.hovered() {
-                        ui.painter().rect_stroke(
-                            response.rect.expand(2.0),
-                            4.0,
-                            Stroke::new(1.0, theme::BRASS_DIM),
-                            egui::StrokeKind::Outside,
-                        );
+                    if choice(ui, name, about) {
+                        picked = Some(Picked::Template(template.to_string(), step));
                     }
-                    if response.clicked() {
-                        picked = Some((template.to_string(), step));
-                    }
-                    ui.add_space(2.0);
                 }
             }
             if first.is_none() {
@@ -3831,6 +3975,13 @@ impl Viewer<'_> {
                 continue;
             };
             let info = variant_info(*node, item.name().unwrap_or_default());
+            // Named by what its step makes: "tiles_1 offset", not just "offset".
+            let made = self.ports.get(node).and_then(|ports| {
+                ports
+                    .iter()
+                    .find(|p| p.access.writes())
+                    .map(|p| p.name.clone())
+            });
             for key in &place.exposed {
                 let Some(field) = item.field(key) else {
                     continue;
@@ -3839,7 +3990,9 @@ impl Viewer<'_> {
                 let about = info.and_then(|i| i.field(key));
                 let ty = about.map_or_else(|| guess_type(text), |f| f.ty);
                 let edit_key = (*node, key.clone());
-                if let Some(new) = value_row(ui, self.edits, &edit_key, about, ty, text)
+                let label = made.as_ref().map_or(key.clone(), |m| format!("{m} {key}"));
+                if let Some(new) =
+                    labeled_value_row(ui, &label, self.edits, &edit_key, about, ty, text)
                     && new != text
                 {
                     self.changes.push(Change::Replace {
@@ -4321,9 +4474,13 @@ impl SnarlViewer<GNode> for Viewer<'_> {
         } else {
             "Add"
         }));
-        if let Some((template, step)) = add_list(ui, self.add_query, |_, _| true) {
-            let index = if step { self.insert.0 } else { self.insert.1 };
-            self.add(template, step, pos, index);
+        match add_list(ui, self.add_query, true, |_, _| true) {
+            Some(Picked::Template(template, step)) => {
+                let index = if step { self.insert.0 } else { self.insert.1 };
+                self.add(template, step, pos, index);
+            }
+            Some(Picked::Block(block)) => self.changes.push(Change::AddBlock { block, at: pos }),
+            None => {}
         }
     }
 
@@ -4356,8 +4513,8 @@ impl SnarlViewer<GNode> for Viewer<'_> {
                     RNode::Step(i) => Some(i + 1),
                     RNode::Output(_) => None,
                 };
-                if let Some((template, step)) =
-                    add_list(ui, self.add_query, |reads, _| reads.contains(&kind))
+                if let Some(Picked::Template(template, step)) =
+                    add_list(ui, self.add_query, false, |reads, _| reads.contains(&kind))
                     && let Change::Add { read, .. } =
                         self.add(template, step, pos, if step { after } else { None })
                 {
@@ -4378,8 +4535,10 @@ impl SnarlViewer<GNode> for Viewer<'_> {
                     RNode::Step(i) => Some(i),
                     RNode::Output(_) => None,
                 };
-                if let Some((template, step)) =
-                    add_list(ui, self.add_query, |_, writes| writes.contains(&kind))
+                if let Some(Picked::Template(template, step)) =
+                    add_list(ui, self.add_query, false, |_, writes| {
+                        writes.contains(&kind)
+                    })
                     && let Change::Add { feed, .. } = self.add(template, step, pos, before)
                 {
                     *feed = Some((node, i));
@@ -4786,6 +4945,33 @@ Recipe(
         assert!(graph.nodes[&RNode::Step(2)].group.is_none());
         assert_eq!(graph.nodes[&RNode::Step(3)].group, Some(group));
         assert_eq!(graph.nodes[&RNode::Step(4)].group, Some(group));
+    }
+
+    #[test]
+    fn a_block_comes_in_as_a_closed_group_that_shows_its_offsets() {
+        let mut graph = graph();
+        let (steps, outputs) = (graph.recipe.steps.len(), graph.recipe.outputs.len());
+        graph.edit(&Edit::AddBlock("GBA tileset".into())).unwrap();
+        let block = &blocks::BLOCKS[0];
+        assert_eq!(graph.recipe.steps.len(), steps + block.steps.len());
+        assert_eq!(graph.recipe.outputs.len(), outputs + block.outputs.len());
+        let group = graph.group_named("GBA tileset").unwrap();
+        assert!(!graph.groups[&group].open);
+        assert!(
+            graph
+                .snarl
+                .node_ids()
+                .any(|(_, n)| *n == GNode::Group(group))
+        );
+        // It reads nothing from outside: everything it uses, it makes.
+        assert!(graph.pins.get(&group).is_none_or(|p| p.inputs.is_empty()));
+        assert!(graph.resolution.missing.is_empty());
+        assert_eq!(graph.nodes[&RNode::Step(steps)].exposed, vec!["offset"]);
+        // Again: new names, and a second group.
+        graph.edit(&Edit::AddBlock("GBA tileset".into())).unwrap();
+        assert!(graph.group_named("GBA tileset 2").is_ok());
+        assert!(graph.resolution.missing.is_empty());
+        assert!(graph.text().contains("\"tileset_2\""));
     }
 
     #[test]

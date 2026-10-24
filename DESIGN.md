@@ -723,6 +723,13 @@ screen's layout (plugins on the left, the selected one on the right):
   each step goes into. With nothing selected the Inspector lists the groups and can group again
   by sections or by outputs, or ungroup all. Recipes of thousands of steps open and stay
   responsive: wires and lineage are looked up, not searched.
+- **Blocks** (`editor/src/recipe_graph/blocks.rs`) are higher-level nodes: the add menu (Space
+  or right-click) lists them first. *GBA tileset*, *GBA tile map*, *GBA palette* and *N64
+  texture* each add the steps and output usually written together (after the selected step, or
+  last) as a closed group that shows the values worth changing, such as each Read's offset and
+  the image's columns, labelled by what their step makes. The names they make get one shared
+  number (`tiles_2`, `bank_2`, ...) so a block added twice doesn't clash. Once added they are
+  plain steps in `recipe.ron`; open the group to change anything else.
 - Both graphs have **Find** (Ctrl+F; matches are outlined and the view moves to each in turn,
   searching a step's whole text in a recipe) and **Fit** (the whole graph), and zoom out far
   enough for recipes of a hundred steps (`editor/src/graph_view.rs`).
@@ -734,7 +741,7 @@ screen's layout (plugins on the left, the selected one on the right):
   remote control has `Screen(Plugins)`, `PluginEditor("name")` and `Graph(…)` for the graph of the
   plugin shown: `Find`, `Fit`, `Undo`, `Redo`, `Save`, `Revert`, and recipe edits by name
   (`Recipe(Value("step 0", "offset", "0x40"))`, `Wire("step 0", "tiles", "step 4", "metatiles")`,
-  `Add("Crop")`, `Move("step 5", false)`, `Duplicate("output 0")`, `Remove("step 3")`), groups
+  `Add("Crop")`, `AddBlock("GBA tileset")`, `Move("step 5", false)`, `Duplicate("output 0")`, `Remove("step 3")`), groups
   (`Group(["step 3", "step 4"], "Tiles")`, `OpenGroup("Tiles")`, `CloseGroup("Tiles")`,
   `Ungroup("Tiles")`, `GroupAutomatically(false)`, `true` to group by outputs); `Report`
   adds the graph's state (steps that ran, wires, missing inputs, error, nodes drawn, groups,
