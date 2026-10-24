@@ -326,6 +326,13 @@ packs and existing plugins.
 | Results | `run_recipe` (summary + image previews the agent can see), `save_plugin` (runs the recipe first), `edit_plugin` (changes a saved recipe a step at a time, keeping its comments; runs it first) |
 | External programs | `list_external_tools` |
 
+**The Library is shared** with the editor through `library.ron` (`clockwork_library::catalog`):
+the server keeps one `Catalog` for every session and, before each tool call, reads the file
+again if it changed, so a game the user imports, names or forgets in the editor is there at the
+agent's next call. Reading it again trusts the records of unchanged files, so no ROM is hashed
+twice; ROMs already read stay in memory while their games stay. `list_games` reads every game
+again.
+
 **External programs** (git, Ghidra, decompilers) live in their own directory, `<data>/tools/`, one
 folder per tool, found before the system PATH. Clockwork does not download them; the user installs
 them there. Ghidra is listed but not wired into any tool yet.

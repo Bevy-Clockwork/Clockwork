@@ -331,8 +331,11 @@ impl Clockwork {
         }
     }
 
+    /// The shared Library, with what the editor changed in it since the last call.
     fn workspace(&self) -> MutexGuard<'_, Workspace> {
-        self.workspace.lock().unwrap_or_else(|e| e.into_inner())
+        let mut ws = self.workspace.lock().unwrap_or_else(|e| e.into_inner());
+        ws.refresh();
+        ws
     }
 
     /// The local clone path of a game's linked decomp.
@@ -368,8 +371,8 @@ impl Clockwork {
         let mut ws = self.workspace();
         *ws = blocking(Workspace::load);
         let mut text = serde_json::to_string_pretty(&ws.games()).unwrap_or_default();
-        if !ws.problems.is_empty() {
-            let _ = write!(text, "\nCould not load: {}", ws.problems.join("; "));
+        if !ws.problems().is_empty() {
+            let _ = write!(text, "\nCould not load: {}", ws.problems().join("; "));
         }
         reply(Ok(text))
     }
