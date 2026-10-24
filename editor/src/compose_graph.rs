@@ -465,6 +465,12 @@ impl CompositionGraph {
                 .node_ids()
                 .all(|(node, _)| self.sizes.contains_key(&node));
         self.sizes = viewer.sizes;
+        self.nav
+            .minimap(ui, id_salt, &self.snarl, &self.sizes, |node| match node {
+                GraphNode::Character(_) => theme::BRASS,
+                GraphNode::Ability(_) | GraphNode::Learn { .. } => theme::PARCHMENT_DIM,
+                GraphNode::Composed { .. } => theme::SUCCESS,
+            });
         self.normalize();
         let arranged = self.arrange_pending && settled;
         if arranged {

@@ -35,6 +35,8 @@ pub struct Navigator {
     viewport: Rect,
     /// Graph to screen, as last drawn.
     shown: TSTransform,
+    /// A point of the graph to move the view's centre to next frame, at the same zoom.
+    pan_to: Option<egui::Pos2>,
 }
 
 impl Default for Navigator {
@@ -50,6 +52,7 @@ impl Default for Navigator {
             readable: false,
             viewport: Rect::NOTHING,
             shown: TSTransform::IDENTITY,
+            pan_to: None,
         }
     }
 }
@@ -166,6 +169,85 @@ impl Navigator {
         }
     }
 
+    /// A small map of the whole graph in the bottom right corner of where it is drawn: every
+    /// node as a block (`color` gives its color), the part in view outlined. A click or a drag
+    /// on it moves the view there. Call after drawing the graph.
+    pub fn minimap<T>(
+        &mut self,
+        ui: &mut Ui,
+        id_salt: &str,
+        snarl: &Snarl<T>,
+        sizes: &HashMap<NodeId, Vec2>,
+        color: impl Fn(&T) -> egui::Color32,
+    ) {
+        let area = self.viewport;
+        if !area.is_positive() || !area.is_finite() {
+            return;
+        }
+        let nodes: Vec<(Rect, egui::Color32)> = snarl
+            .nodes_pos_ids()
+            .map(|(id, pos, node)| {
+                let size = sizes.get(&id).copied().unwrap_or(vec2(240.0, 120.0));
+                (Rect::from_min_size(pos, size), color(node))
+            })
+            .collect();
+        let Some(bounds) = nodes.iter().map(|(r, _)| *r).reduce(Rect::union) else {
+            return;
+        };
+        let view = self.shown.inverse() * area;
+        // Not worth it while everything is in view (or before the view is known).
+        if !view.is_finite() || view.contains_rect(bounds) {
+            return;
+        }
+        let world = bounds.union(view).expand(MARGIN);
+        let side = vec2(200.0, 140.0).min(area.size() * 0.3);
+        let scale = (side.x / world.width()).min(side.y / world.height());
+        if !scale.is_finite() || scale <= 0.0 {
+            return;
+        }
+        let size = world.size() * scale;
+        let map = Rect::from_min_size(area.right_bottom() - size - vec2(12.0, 12.0), size);
+        let to_map = |p: egui::Pos2| map.min + (p - world.min) * scale;
+        let to_graph = |p: egui::Pos2| world.min + (p - map.min) / scale;
+
+        // Over the graph's nodes, which are drawn on a layer of their own.
+        let shown = egui::Area::new(egui::Id::new(("minimap", id_salt)))
+            .order(egui::Order::Foreground)
+            .fixed_pos(map.min)
+            .show(ui.ctx(), |ui| {
+                let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
+                let painter = ui.painter();
+                painter.rect(
+                    rect.expand(4.0),
+                    4.0,
+                    egui::Color32::from_black_alpha(200),
+                    Stroke::new(1.0, theme::BORDER),
+                    egui::StrokeKind::Inside,
+                );
+                for (r, color) in &nodes {
+                    let r = Rect::from_min_max(to_map(r.min), to_map(r.max));
+                    // At least a dot, so tiny nodes still show.
+                    let r = Rect::from_center_size(r.center(), r.size().max(vec2(2.0, 2.0)));
+                    painter.rect_filled(r, 1.0, *color);
+                }
+                let v = Rect::from_min_max(to_map(view.min), to_map(view.max)).intersect(rect);
+                painter.rect_stroke(
+                    v,
+                    2.0,
+                    Stroke::new(1.5, theme::BRASS_BRIGHT),
+                    egui::StrokeKind::Inside,
+                );
+                response.on_hover_text("The whole graph: click or drag to look elsewhere")
+            });
+        let response = shown.inner;
+        if let Some(at) = response.interact_pointer_pos()
+            && (response.clicked() || response.dragged())
+        {
+            self.pan_to = Some(to_graph(at));
+            ui.ctx().request_repaint();
+        }
+    }
+
     /// The node frame for a match (outlined) or any other node.
     pub fn frame(&self, default: egui::Frame, node: NodeId) -> egui::Frame {
         match self.matches.iter().position(|m| *m == node) {
@@ -178,6 +260,13 @@ impl Navigator {
     /// Moves the view where [`Navigator::update`] decided, from the viewer's
     /// `current_transform`.
     pub fn transform(&mut self, to_global: &mut TSTransform) {
+        if let Some(at) = self.pan_to.take() {
+            let scale = to_global.scaling;
+            *to_global = TSTransform::new(
+                self.viewport.center().to_vec2() - at.to_vec2() * scale,
+                scale,
+            );
+        }
         let Some(rect) = self.look_at.take() else {
             self.shown = *to_global;
             return;

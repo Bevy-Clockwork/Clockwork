@@ -11,6 +11,7 @@ use std::{
     ops::Range,
     path::Path,
     sync::Arc,
+    sync::LazyLock,
 };
 
 use bevy_egui::egui::{
@@ -45,6 +46,7 @@ use crate::{
 
 mod blocks;
 mod groups;
+mod order;
 
 use groups::{GNode, GroupId, GroupInfo, SavedGroup};
 
@@ -186,7 +188,9 @@ struct StepResult {
     lines: Vec<String>,
     /// The first bytes of a buffer it made.
     bytes: Option<Vec<u8>>,
+    /// A picture of what it made (shrunk), and the size of the image it shows.
     image: Option<RgbaImage>,
+    full: Option<(u32, u32)>,
 }
 
 #[derive(Default)]
@@ -417,6 +421,7 @@ fn summarize(ports: &[OwnedPort], made: &Made) -> StepResult {
             NameKind::Image => made.image(name).map(|image| {
                 if result.image.is_none() {
                     result.image = Some(shrink(image, THUMB));
+                    result.full = Some((image.width, image.height));
                 }
                 format!("{name}: {}×{}", image.width, image.height)
             }),
@@ -590,6 +595,86 @@ pub const OUTPUT_TEMPLATES: &[(&str, &str)] = &[
         r#"Ability(id: "new_ability", name: "New ability", from: "", actions: [])"#,
     ),
 ];
+
+/// Every step or output that can be added, by variant name: the written templates, then one
+/// for each other kind of output the schema describes, made from its starter
+/// ([`clockwork_core::asset::starter`]: a built-in asset or default values) or from its
+/// fields' defaults.
+fn templates(step: bool) -> &'static [(&'static str, String)] {
+    static STEPS: LazyLock<Vec<(&'static str, String)>> = LazyLock::new(|| {
+        STEP_TEMPLATES
+            .iter()
+            .map(|(n, t)| (*n, t.to_string()))
+            .collect()
+    });
+    static OUTPUTS: LazyLock<Vec<(&'static str, String)>> = LazyLock::new(|| {
+        let mut all: Vec<(&'static str, String)> = OUTPUT_TEMPLATES
+            .iter()
+            .map(|(n, t)| (*n, t.to_string()))
+            .collect();
+        for info in recipe_schema::OUTPUTS {
+            if !all.iter().any(|(n, _)| *n == info.name)
+                && let Some(template) = schema_template(info)
+            {
+                all.push((info.name, template));
+            }
+        }
+        all
+    });
+    if step { &STEPS } else { &OUTPUTS }
+}
+
+/// A new output of a kind with no written template, if one can be made that parses.
+fn schema_template(info: &recipe_schema::VariantInfo) -> Option<String> {
+    let id = format!("new_{}", snake(info.name));
+    let pretty = ron::ser::PrettyConfig::new()
+        .compact_structs(true)
+        .compact_arrays(true)
+        .compact_maps(true);
+    if let Some(output) = clockwork_core::asset::starter(info.name, &id) {
+        return ron::ser::to_string_pretty(&output, pretty).ok();
+    }
+    // Its required fields at their defaults, each structure tried as a list, a map, a record
+    // and a pair until the whole parses.
+    const CANDIDATES: [&str; 4] = ["[]", "{}", "()", "(8, 8)"];
+    let fields: Vec<&recipe_schema::FieldInfo> =
+        info.fields.iter().filter(|f| !f.optional).collect();
+    let structures = fields
+        .iter()
+        .filter(|f| f.key != "id" && f.ty == FieldType::Structure)
+        .count();
+    (0..CANDIDATES.len().pow(structures as u32)).find_map(|mut pick| {
+        let values: Vec<String> = fields
+            .iter()
+            .map(|f| {
+                let value = if f.key == "id" {
+                    format!("\"{id}\"")
+                } else if f.ty == FieldType::Structure {
+                    let candidate = CANDIDATES[pick % CANDIDATES.len()];
+                    pick /= CANDIDATES.len();
+                    candidate.to_string()
+                } else {
+                    f.ty.default_text().to_string()
+                };
+                format!("{}: {value}", f.key)
+            })
+            .collect();
+        let text = format!("{}({})", info.name, values.join(", "));
+        ron::from_str::<Output>(&text).is_ok().then_some(text)
+    })
+}
+
+/// "input_map" from "InputMap".
+fn snake(name: &str) -> String {
+    let mut out = String::new();
+    for (i, c) in name.chars().enumerate() {
+        if c.is_uppercase() && i > 0 {
+            out.push('_');
+        }
+        out.extend(c.to_lowercase());
+    }
+    out
+}
 
 /// The kinds a template's step or output reads, and the kinds it makes.
 fn template_kinds(template: &str, step: bool) -> (Vec<NameKind>, Vec<NameKind>) {
@@ -797,6 +882,8 @@ pub struct RecipeGraph {
     arrange_pending: bool,
     /// Finding nodes and moving the view.
     pub nav: Navigator,
+    /// Whether the order steps run in is drawn over the graph.
+    pub show_order: bool,
     /// Every plugin's assets, where the recipe's characters find the parts they name.
     pub assets: Arc<clockwork_recipe::assets::OwnedAssets>,
     /// The plugin's name, for the parts it names of itself.
@@ -921,6 +1008,7 @@ impl RecipeGraph {
             sizes: HashMap::new(),
             arrange_pending: !complete,
             nav: Navigator::default(),
+            show_order: false,
             focus: None,
             focus_group: None,
             text_buffer: None,
@@ -1810,15 +1898,15 @@ impl RecipeGraph {
                 }
             }
             Edit::Add(variant) => {
-                let (template, step) = STEP_TEMPLATES
+                let (template, step) = templates(true)
                     .iter()
                     .find(|(n, _)| n == variant)
-                    .map(|(_, t)| (*t, true))
+                    .map(|(_, t)| (t.as_str(), true))
                     .or_else(|| {
-                        OUTPUT_TEMPLATES
+                        templates(false)
                             .iter()
                             .find(|(n, _)| n == variant)
-                            .map(|(_, t)| (*t, false))
+                            .map(|(_, t)| (t.as_str(), false))
                     })
                     .ok_or_else(|| format!("there is no step or output called {variant}"))?;
                 Change::Add {
@@ -2010,6 +2098,7 @@ impl RecipeGraph {
             nodes: &self.nodes,
             edits: &mut self.edits,
             last_sizes: &self.sizes,
+            show_order: self.show_order,
             changes: Vec::new(),
             group_changes: Vec::new(),
             sizes: HashMap::new(),
@@ -2023,6 +2112,12 @@ impl RecipeGraph {
         changes.extend(std::mem::take(&mut viewer.changes));
         let mut group_changes = std::mem::take(&mut viewer.group_changes);
         let sizes = std::mem::take(&mut viewer.sizes);
+        self.nav
+            .minimap(ui, id_salt, &self.snarl, &self.sizes, |node| match node {
+                GNode::Item(RNode::Step(_)) => theme::PARCHMENT_DIM,
+                GNode::Item(RNode::Output(_)) => theme::SUCCESS,
+                GNode::Group(_) => theme::BRASS,
+            });
 
         // Open groups have their name and a button to close them above their frame.
         for (g, _, rect) in frames {
@@ -2294,7 +2389,7 @@ impl RecipeGraph {
         let Some(node) = self.focus else {
             match self.focus_group.filter(|g| self.groups.contains_key(g)) {
                 Some(group) => self.group_inspector(ui, group),
-                None => self.overview(ui),
+                None => self.overview(ui, changes),
             }
             return;
         };
@@ -2314,6 +2409,7 @@ impl RecipeGraph {
             thumbs,
             revision,
             nodes,
+            rom,
             ..
         } = self;
         let Some(item) = Self::node_doc(doc, node) else {
@@ -2550,6 +2646,59 @@ impl RecipeGraph {
                     });
                 }
             }
+            // A Crop's region is drawn on the image it crops.
+            if item.name() == Some("Crop")
+                && let Some(field) = fields.iter().find(|f| f.key == "region")
+                && let Some(region) = parse_region(doc.text_of(&field.value))
+                && let Some(from) = node_ports.iter().position(|p| p.label() == "from")
+                && let Some((source, _)) = resolution.source.get(&(node, from))
+                && let Some(made) = match source {
+                    RNode::Step(i) => trace.steps.get(*i).and_then(Option::as_ref),
+                    RNode::Output(_) => None,
+                }
+                && let (Some(image), Some(full)) = (&made.image, made.full)
+            {
+                kit::section(ui, "Region");
+                ui.label(kit::dim("Drag on the image to choose what to keep."));
+                let texture = thumb(ui.ctx(), thumbs, *revision, *source, image);
+                if let Some(new) = region_picker(ui, &texture, full, region)
+                    && new != region
+                {
+                    let (x, y, w, h) = new;
+                    changes.push(Change::Replace {
+                        span: field.value.span.clone(),
+                        text: format!("(x: {x}, y: {y}, w: {w}, h: {h})"),
+                        field: Some((node, "region".into())),
+                    });
+                }
+            }
+            // A Read's offset is picked in the ROM itself, its bytes highlighted.
+            if item.name() == Some("Read")
+                && let Some(rom) = rom.as_deref()
+                && let Some(field) = fields.iter().find(|f| f.key == "offset")
+                && let Some(offset) = parse_int(doc.text_of(&field.value).trim())
+            {
+                let size = fields
+                    .iter()
+                    .find(|f| f.key == "size")
+                    .and_then(|f| {
+                        let text = doc.text_of(&f.value).trim();
+                        parse_int(text.strip_prefix("Some(")?.strip_suffix(')')?)
+                    })
+                    .unwrap_or(1);
+                egui::CollapsingHeader::new("Pick the offset in the ROM")
+                    .id_salt(("rom picker", node_key(node)))
+                    .show(ui, |ui| {
+                        let picked = rom_picker(ui, rom, offset as usize, size as usize, node);
+                        if let Some(at) = picked.filter(|at| *at as i64 != offset) {
+                            changes.push(Change::Replace {
+                                span: field.value.span.clone(),
+                                text: format!("{at:#x}"),
+                                field: Some((node, "offset".into())),
+                            });
+                        }
+                    });
+            }
         }
 
         // Values the closed group shows, so the group can be changed without opening it.
@@ -2740,7 +2889,7 @@ impl RecipeGraph {
     }
 
     /// The Inspector with nothing selected: how to edit, then what is wrong.
-    fn overview(&mut self, ui: &mut Ui) {
+    fn overview(&mut self, ui: &mut Ui, changes: &mut Vec<Change>) {
         ui.label(
             RichText::new("Nothing selected")
                 .font(theme::display(18.0))
@@ -2824,6 +2973,8 @@ impl RecipeGraph {
             self.frame_group(g);
         }
 
+        self.run_order(ui, changes);
+
         let problems = self.problems();
         kit::section(ui, &format!("Problems · {}", problems.len()));
         if problems.is_empty() {
@@ -2842,6 +2993,61 @@ impl RecipeGraph {
                     ui.label(text);
                 }
             }
+        }
+        if let Some(node) = go {
+            self.go_to(node);
+        }
+    }
+
+    /// The steps in the order they run, each dragged by its handle to run elsewhere (dropped
+    /// on a step, it takes that step's place). A click goes to it.
+    fn run_order(&mut self, ui: &mut Ui, changes: &mut Vec<Change>) {
+        let steps = self.recipe.steps.len();
+        kit::section(ui, &format!("Run order · {steps}"));
+        ui.checkbox(&mut self.show_order, "Show the order on the graph")
+            .on_hover_text("A numbered path from each step to the next");
+        ui.label(kit::dim("Drag a step by ⠿ to make it run elsewhere."));
+        let mut go = None;
+        let mut moved = None;
+        let row_h = 22.0;
+        egui::ScrollArea::vertical()
+            .id_salt("run order")
+            .max_height(260.0)
+            .show_rows(ui, row_h, steps, |ui, rows| {
+                for i in rows {
+                    let node = RNode::Step(i);
+                    let row = ui
+                        .horizontal(|ui| {
+                            ui.set_min_height(row_h - 2.0);
+                            ui.dnd_drag_source(egui::Id::new(("run order", i)), i, |ui| {
+                                ui.label(RichText::new("⠿").color(theme::FAINT));
+                            })
+                            .response
+                            .on_hover_cursor(egui::CursorIcon::Grab);
+                            if ui.link(title(&self.doc, node)).clicked() {
+                                go = Some(node);
+                            }
+                        })
+                        .response;
+                    if let Some(from) = row.dnd_release_payload::<usize>()
+                        && *from != i
+                    {
+                        moved = Some((*from, i));
+                    }
+                    if row.dnd_hover_payload::<usize>().is_some() {
+                        ui.painter().hline(
+                            row.rect.x_range(),
+                            row.rect.top(),
+                            egui::Stroke::new(2.0, theme::BRASS_BRIGHT),
+                        );
+                    }
+                }
+            });
+        if let Some((from, to)) = moved {
+            changes.push(Change::MoveTo {
+                node: RNode::Step(from),
+                to,
+            });
         }
         if let Some(node) = go {
             self.go_to(node);
@@ -3743,6 +3949,156 @@ fn edit_value(
     }
 }
 
+/// `(x: 0, y: 8, w: 16, h: 16)` read as (x, y, w, h).
+fn parse_region(text: &str) -> Option<(u32, u32, u32, u32)> {
+    let inner = text.trim().strip_prefix('(')?.strip_suffix(')')?;
+    let mut values = HashMap::new();
+    for part in inner.split(',').filter(|p| !p.trim().is_empty()) {
+        let (key, value) = part.split_once(':')?;
+        values.insert(key.trim(), u32::try_from(parse_int(value.trim())?).ok()?);
+    }
+    Some((
+        *values.get("x")?,
+        *values.get("y")?,
+        *values.get("w")?,
+        *values.get("h")?,
+    ))
+}
+
+/// The image a region is cut from (`full` pixels, shown as `texture`), the region outlined;
+/// a drag draws a new one, in whole pixels. Returns it when the drag ends.
+fn region_picker(
+    ui: &mut Ui,
+    texture: &TextureHandle,
+    full: (u32, u32),
+    region: (u32, u32, u32, u32),
+) -> Option<(u32, u32, u32, u32)> {
+    let (fw, fh) = (full.0.max(1) as f32, full.1.max(1) as f32);
+    let width = ui.available_width().min(320.0);
+    let size = vec2(width, width * fh / fw).min(vec2(width, 320.0));
+    let size = vec2(size.y * fw / fh, size.y).min(size);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::drag());
+    let painter = ui.painter();
+    painter.rect_filled(rect, 0.0, theme::BG_DEEP);
+    painter.image(
+        texture.id(),
+        rect,
+        Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+        Color32::WHITE,
+    );
+    let scale = size.x / fw;
+    let to_pixel = |p: Pos2| {
+        let v = (p - rect.min) / scale;
+        (
+            v.x.clamp(0.0, fw).round() as u32,
+            v.y.clamp(0.0, fh).round() as u32,
+        )
+    };
+    let to_screen = |(x, y): (u32, u32)| rect.min + vec2(x as f32, y as f32) * scale;
+    let id = response.id.with("start");
+    let start: Option<Pos2> = ui.data(|d| d.get_temp(id));
+    if response.drag_started()
+        && let Some(at) = response.interact_pointer_pos()
+    {
+        ui.data_mut(|d| d.insert_temp(id, at));
+    }
+    let drawn = match (start, response.interact_pointer_pos()) {
+        (Some(a), Some(b)) if response.dragged() || response.drag_stopped() => {
+            let (a, b) = (to_pixel(a), to_pixel(b));
+            let (x, y) = (a.0.min(b.0), a.1.min(b.1));
+            Some((x, y, a.0.max(b.0) - x, a.1.max(b.1) - y))
+        }
+        _ => None,
+    };
+    let (x, y, w, h) = drawn.unwrap_or(region);
+    let shown = Rect::from_min_max(to_screen((x, y)), to_screen((x + w, y + h)));
+    painter.rect_stroke(
+        shown,
+        0.0,
+        Stroke::new(2.0, theme::BRASS_BRIGHT),
+        egui::StrokeKind::Outside,
+    );
+    ui.label(kit::dim(format!(
+        "x {x}, y {y}, {w}×{h} of {}×{}",
+        full.0, full.1
+    )));
+    if response.drag_stopped() {
+        ui.data_mut(|d| d.remove::<Pos2>(id));
+        return drawn.filter(|(_, _, w, h)| *w > 0 && *h > 0);
+    }
+    None
+}
+
+/// Sixteen rows of a ROM's bytes from about `offset`, the `size` bytes read from there
+/// highlighted; paged with the buttons. Returns the address of a byte clicked.
+fn rom_picker(ui: &mut Ui, rom: &[u8], offset: usize, size: usize, node: RNode) -> Option<usize> {
+    const ROW: usize = 16;
+    const PAGE: usize = ROW * 16;
+    let id = egui::Id::new(("rom picker start", node_key(node)));
+    let last = rom.len().saturating_sub(1) / ROW * ROW;
+    let mut start: usize = ui
+        .data(|d| d.get_temp(id))
+        .unwrap_or(offset / ROW * ROW)
+        .min(last);
+    ui.horizontal(|ui| {
+        if kit::icon_button(ui, "⏪", "Back a page").clicked() {
+            start = start.saturating_sub(PAGE);
+        }
+        if kit::icon_button(ui, "⏩", "On a page").clicked() {
+            start = (start + PAGE).min(last);
+        }
+        if ui
+            .small_button("To the offset")
+            .on_hover_text("Show where it reads now")
+            .clicked()
+        {
+            start = offset / ROW * ROW;
+        }
+        ui.label(kit::dim("Click a byte to read from there"));
+    });
+    ui.data_mut(|d| d.insert_temp(id, start));
+    let mut picked = None;
+    let font = egui::FontId::monospace(11.5);
+    let read = offset..offset + size.max(1);
+    ui.spacing_mut().item_spacing.y = 1.0;
+    for row in (start..rom.len().min(start + PAGE)).step_by(ROW) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 3.0;
+            ui.label(
+                RichText::new(format!("{row:06X}"))
+                    .font(font.clone())
+                    .color(theme::FAINT),
+            );
+            for (at, byte) in rom[row..rom.len().min(row + ROW)].iter().enumerate() {
+                let at = row + at;
+                let color = if read.contains(&at) {
+                    theme::BRASS_BRIGHT
+                } else {
+                    theme::PARCHMENT_DIM
+                };
+                let text = RichText::new(format!("{byte:02X}"))
+                    .font(font.clone())
+                    .color(color);
+                let response = ui
+                    .add(egui::Label::new(text).sense(egui::Sense::click()))
+                    .on_hover_text(format!("{at:#x}"));
+                if response.hovered() {
+                    ui.painter().rect_stroke(
+                        response.rect.expand(1.0),
+                        2.0,
+                        Stroke::new(1.0, theme::BRASS),
+                        egui::StrokeKind::Outside,
+                    );
+                }
+                if response.clicked() {
+                    picked = Some(at);
+                }
+            }
+        });
+    }
+    picked
+}
+
 /// The indentation every line but the first of `text` has in common.
 fn indent_of(text: &str) -> String {
     text.lines()
@@ -3865,8 +4221,8 @@ fn add_list(
                 }
             }
             for (heading, templates, step) in [
-                ("Steps", STEP_TEMPLATES, true),
-                ("Outputs", OUTPUT_TEMPLATES, false),
+                ("Steps", templates(true), true),
+                ("Outputs", templates(false), false),
             ] {
                 let matching: Vec<(&str, &str, &str)> = templates
                     .iter()
@@ -3881,7 +4237,11 @@ fn add_list(
                         let found = q.is_empty()
                             || name.to_lowercase().contains(&q)
                             || about.to_lowercase().contains(&q);
-                        (found && filter(&reads, &writes)).then_some((*name, *template, about))
+                        (found && filter(&reads, &writes)).then_some((
+                            *name,
+                            template.as_str(),
+                            about,
+                        ))
                     })
                     .collect();
                 if matching.is_empty() {
@@ -3961,6 +4321,7 @@ struct Viewer<'a> {
     edits: &'a mut HashMap<(RNode, String), String>,
     /// Node sizes as last drawn, for the frames of open groups.
     last_sizes: &'a HashMap<NodeId, Vec2>,
+    show_order: bool,
     changes: Vec<Change>,
     /// Groups to open or close, ungroup, or rename.
     group_changes: Vec<GroupChange>,
@@ -4289,6 +4650,22 @@ impl SnarlViewer<GNode> for Viewer<'_> {
                     theme::BRASS_BRIGHT,
                 );
             }
+        }
+        if self.show_order {
+            let drawn: HashMap<GNode, Rect> = snarl
+                .nodes_pos_ids()
+                .map(|(id, pos, node)| {
+                    let size = self
+                        .last_sizes
+                        .get(&id)
+                        .copied()
+                        .unwrap_or(vec2(240.0, 100.0));
+                    (*node, Rect::from_min_size(pos, size))
+                })
+                .collect();
+            let group_of = |s: usize| self.nodes.get(&RNode::Step(s)).and_then(|p| p.group);
+            let path = order::run_path(self.steps, &drawn, self.groups, group_of);
+            order::draw(painter, &path);
         }
     }
 
@@ -4969,10 +5346,31 @@ Recipe(
             let step: Step = ron::from_str(template).unwrap_or_else(|e| panic!("{name}: {e}"));
             assert_eq!(step.name(), *name);
         }
-        for (name, template) in OUTPUT_TEMPLATES {
+        for (name, template) in templates(false) {
             let output: Output = ron::from_str(template).unwrap_or_else(|e| panic!("{name}: {e}"));
             assert_eq!(output.name(), *name);
         }
+    }
+
+    #[test]
+    fn regions_are_read_from_their_text() {
+        assert_eq!(
+            parse_region("(x: 0, y: 0x10, w: 16, h: 8)"),
+            Some((0, 16, 16, 8))
+        );
+        assert_eq!(parse_region("(x: 1, y: 2, w: 3)"), None);
+        assert_eq!(parse_region("Some(1)"), None);
+    }
+
+    #[test]
+    fn every_kind_of_output_can_be_added() {
+        let missing: Vec<&str> = recipe_schema::OUTPUTS
+            .iter()
+            .map(|i| i.name)
+            .filter(|n| !templates(false).iter().any(|(t, _)| t == n))
+            .collect();
+        assert_eq!(missing, Vec::<&str>::new());
+        assert_eq!(snake("InputMap"), "input_map");
     }
 
     #[test]
@@ -5274,15 +5672,15 @@ Recipe(
 
     #[test]
     fn every_template_field_is_described() {
-        for (templates, step) in [(STEP_TEMPLATES, true), (OUTPUT_TEMPLATES, false)] {
-            for (name, template) in templates {
+        for step in [true, false] {
+            for (name, template) in templates(step) {
                 let info = if step {
                     recipe_schema::step(name)
                 } else {
                     recipe_schema::output(name)
                 }
                 .unwrap_or_else(|| panic!("{name} isn't described"));
-                let doc = Doc::parse(*template).unwrap();
+                let doc = Doc::parse(template.as_str()).unwrap();
                 let Kind::Struct { fields, .. } = &doc.root.kind else {
                     panic!("{name}");
                 };

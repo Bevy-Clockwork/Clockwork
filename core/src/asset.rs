@@ -591,6 +591,99 @@ pub fn kind(output: &Output) -> &'static AssetKind {
         .expect("every output variant is registered in KINDS")
 }
 
+/// A new output of a kind (by [`Output::name`]) with id `id`, for editors to add: the kind's
+/// first built-in asset, or one holding default values. `None` for kinds with nothing to start
+/// from that a template couldn't say better (images, models: they need a step's result).
+pub fn starter(name: &str, id: &str) -> Option<Output> {
+    let mut output = builtins()
+        .iter()
+        .find(|o| o.name() == name)
+        .cloned()
+        .or_else(|| {
+            let id = id.to_string();
+            Some(match name {
+                "Hud" => Output::Hud {
+                    id,
+                    hud: Slot::Inline(Default::default()),
+                },
+                "Flow" => Output::Flow {
+                    id,
+                    flow: Slot::Inline(Default::default()),
+                },
+                "InputMap" => Output::InputMap {
+                    id,
+                    input: Slot::Inline(Default::default()),
+                },
+                "Stats" => Output::Stats {
+                    id,
+                    stats: Slot::Inline(Default::default()),
+                },
+                "Rules" => Output::Rules {
+                    id,
+                    rules: Slot::Inline(Default::default()),
+                },
+                "Game" => Output::Game {
+                    id,
+                    game: Slot::Inline(Default::default()),
+                },
+                "Sounds" => Output::Sounds {
+                    id,
+                    sounds: Slot::Inline(Default::default()),
+                },
+                // A walk at a usual speed, and each direction's animations named after it.
+                "Movement" => Output::Movement {
+                    id,
+                    movement: Slot::Inline(crate::parts::AnyMovement::TopDown(
+                        crate::character2d::Movement2d {
+                            speed: 4.0,
+                            acceleration: None,
+                            radius: 0.4,
+                            gravity: 9.8,
+                        },
+                    )),
+                },
+                "Animations" => {
+                    use crate::character2d::{AnimationRef, Animations2d, Directional};
+                    let named = |name: String| AnimationRef {
+                        name,
+                        flip_x: false,
+                        flip_y: false,
+                    };
+                    let set = |what: &str| Directional {
+                        north: named(format!("{what}_north")),
+                        east: named(format!("{what}_east")),
+                        south: named(format!("{what}_south")),
+                        west: named(format!("{what}_west")),
+                    };
+                    Output::Animations {
+                        id,
+                        animations: Slot::Inline(crate::parts::AnyAnimations::Directional(
+                            Animations2d {
+                                idle: set("idle"),
+                                walk: set("walk"),
+                            },
+                        )),
+                    }
+                }
+                _ => return None,
+            })
+        })?;
+    output.set_id(id);
+    Some(output)
+}
+
+#[cfg(test)]
+mod starter_tests {
+    #[test]
+    fn starters_are_named_as_asked() {
+        for name in ["Camera", "Hud", "Flow", "Movement", "Animations", "Sounds"] {
+            let output = super::starter(name, "new_one").unwrap_or_else(|| panic!("{name}"));
+            assert_eq!((output.name(), output.id()), (name, "new_one"));
+        }
+        assert!(super::starter("Image", "x").is_none());
+    }
+}
+
 /// The built-in assets of every kind, all in the [`BUILTIN`] plugin.
 pub fn builtins() -> &'static [Output] {
     static ALL: LazyLock<Vec<Output>> =
