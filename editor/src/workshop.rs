@@ -536,7 +536,7 @@ fn add_scene(
                 },
             )];
         }
-        if let Some(behavior) = &node.behavior {
+        for behavior in &node.behaviors {
             behaviors.push((id, clockwork_core::asset::OutputRef::new(&plugin, behavior)));
         }
     }
@@ -1231,7 +1231,7 @@ mod tests {
                     fade: 0.6,
                 }),
                 animation: item.map(|_| "still".to_string()),
-                behavior: None,
+                behaviors: Vec::new(),
             };
         let template = SceneTemplate {
             nodes: vec![

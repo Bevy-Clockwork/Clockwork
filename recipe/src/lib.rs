@@ -175,14 +175,26 @@ impl Song {
 
 /// Text from `bytes` starting at `at` up to the `end` byte (or `length` bytes): each byte the
 /// text `codes` gives it, else its character in a run of `runs`, else `other`.
+/// What a game's text bytes mean (see [`Step::Text`]).
+#[derive(Clone, Copy)]
+struct CharMap<'a> {
+    runs: &'a [(u8, String)],
+    codes: &'a std::collections::BTreeMap<u8, String>,
+    params: &'a std::collections::BTreeMap<u8, u8>,
+}
+
 fn decode_text(
     bytes: &[u8],
     at: u32,
-    runs: &[(u8, String)],
-    codes: &std::collections::BTreeMap<u8, String>,
+    map: CharMap<'_>,
     (end, length): (u8, Option<u32>),
     other: Option<&str>,
 ) -> Result<String, String> {
+    let CharMap {
+        runs,
+        codes,
+        params,
+    } = map;
     let mut text = String::new();
     let mut i = at as usize;
     loop {
@@ -194,6 +206,14 @@ fn decode_text(
         };
         if byte == end {
             return Ok(text);
+        }
+        if let Some(&count) = params.get(&byte) {
+            // A control code and its parameters: only the code means something.
+            if let Some(code) = codes.get(&byte) {
+                text.push_str(code);
+            }
+            i += 1 + count as usize;
+            continue;
         }
         if let Some(code) = codes.get(&byte) {
             text.push_str(code);
@@ -489,6 +509,7 @@ fn run_step(step: usize, s: &Step, rom: &[u8], made: &mut Made) -> Result<(), Re
                 at,
                 runs,
                 codes,
+                params,
                 end,
                 length,
                 other,
@@ -497,8 +518,18 @@ fn run_step(step: usize, s: &Step, rom: &[u8], made: &mut Made) -> Result<(), Re
                 let bytes = buffers
                     .get(from.as_str())
                     .ok_or_else(|| unknown("buffer", from))?;
-                let text = decode_text(bytes, *at, runs, codes, (*end, *length), other.as_deref())
-                    .map_err(|message| RecipeError::Decode { step, message })?;
+                let text = decode_text(
+                    bytes,
+                    *at,
+                    CharMap {
+                        runs,
+                        codes,
+                        params,
+                    },
+                    (*end, *length),
+                    other.as_deref(),
+                )
+                .map_err(|message| RecipeError::Decode { step, message })?;
                 buffers.insert(into.clone(), text.into_bytes());
             }
             Step::Canvas {
@@ -687,6 +718,7 @@ fn run_step(step: usize, s: &Step, rom: &[u8], made: &mut Made) -> Result<(), Re
                 door,
                 animation,
                 behavior,
+                behaviors,
                 code,
                 extent,
                 into,
@@ -758,10 +790,13 @@ fn run_step(step: usize, s: &Step, rom: &[u8], made: &mut Made) -> Result<(), Re
                                 })
                                 .transpose()?,
                             animation: animation.as_deref().map(fill).transpose()?,
-                            behavior: behavior
-                                .as_ref()
-                                .and_then(|b| b.pick(record, index))
-                                .map(str::to_string),
+                            behaviors: behavior
+                                .iter()
+                                .map(|b| &**b)
+                                .chain(behaviors)
+                                .filter_map(|b| b.pick(record, index))
+                                .map(str::to_string)
+                                .collect(),
                             code: match code {
                                 Some(field) => {
                                     field.read(record).ok_or_else(|| short("code", index))?
@@ -1283,17 +1318,16 @@ fn outputs(
                         .iter()
                         .any(|o| matches!(o, Output::Behavior { id, .. } if id == behavior))
                 };
-                if let Some(node) = scene
+                if let Some((node, behavior)) = scene
                     .nodes
                     .iter()
-                    .find(|n| n.behavior.as_deref().is_some_and(|b| !does(b)))
+                    .find_map(|n| n.behaviors.iter().find(|b| !does(b)).map(|b| (n, b)))
                 {
                     return Err(RecipeError::Part {
                         id: id.clone(),
                         message: format!(
                             "node \"{}\" does \"{}\", which is not a Behavior output of this plugin",
-                            node.name,
-                            node.behavior.as_deref().unwrap_or_default()
+                            node.name, behavior
                         ),
                     });
                 }
@@ -1773,8 +1807,11 @@ mod tests {
             decode_text(
                 &[0x02, 0xFF],
                 0,
-                &runs,
-                &Default::default(),
+                CharMap {
+                    runs: &runs,
+                    codes: &Default::default(),
+                    params: &Default::default(),
+                },
                 (0xFF, None),
                 None
             )
@@ -1785,8 +1822,11 @@ mod tests {
             decode_text(
                 &[0x02, 0xFF],
                 0,
-                &runs,
-                &Default::default(),
+                CharMap {
+                    runs: &runs,
+                    codes: &Default::default(),
+                    params: &Default::default(),
+                },
                 (0xFF, None),
                 Some("?")
             )
@@ -1799,13 +1839,36 @@ mod tests {
             decode_text(
                 &[0x00, 0x01, 0x00],
                 0,
-                &runs,
-                &Default::default(),
+                CharMap {
+                    runs: &runs,
+                    codes: &Default::default(),
+                    params: &Default::default(),
+                },
                 (0xFF, Some(2)),
                 None
             )
             .unwrap(),
             "AB"
+        );
+        // Control codes skip their parameters, even ones equal to the end byte; the code means
+        // what `codes` gives it.
+        let letters = vec![(0x41, "AB".to_string())];
+        let codes = [(0x03, "!".to_string())].into_iter().collect();
+        let params = [(0x02, 1), (0x03, 2)].into_iter().collect();
+        assert_eq!(
+            decode_text(
+                &[0x41, 0x02, 0x05, 0x42, 0x03, 0x00, 0x41, 0x41, 0x00],
+                0,
+                CharMap {
+                    runs: &letters,
+                    codes: &codes,
+                    params: &params,
+                },
+                (0x00, None),
+                None
+            )
+            .unwrap(),
+            "AB!A"
         );
     }
 
@@ -2193,6 +2256,8 @@ mod tests {
                            x: (at: 2, size: U16), y: (at: 4, size: U16), origin: (100, 0),
                            item: Some((by: Some((at: 1)), outputs: { 5: "room" })),
                            behavior: Some((by: Some((at: 1)), outputs: { 7: "slime" })),
+                           behaviors: [(outputs: {}, other: Some("solid")),
+                                       (by: Some((at: 1)), outputs: { 5: "slime" })],
                            name: (text: "enemy {} #{index}", fields: [(at: 1)]),
                            animation: Some((text: "frame_{}", fields: [(at: 0)])),
                            group: Some((text: "Room")), code: Some((at: 1)), into: "enemies"),
@@ -2210,6 +2275,7 @@ mod tests {
                     Image(id: "room", from: "room", kind: Some(Area)),
                     Scene(id: "world", from: ["enemies", "doors"]),
                     Behavior(id: "slime", behavior: Actor((radius: 0.4, states: [(name: "idle")]))),
+                    Behavior(id: "solid", behavior: Solid(radius: 0.5)),
                 ],
             )"#,
         )
@@ -2227,8 +2293,10 @@ mod tests {
         assert_eq!(scene.nodes[1].item, None);
         assert_eq!(scene.nodes[0].group.as_deref(), Some("Room"));
         assert_eq!(scene.nodes[0].animation.as_deref(), Some("frame_1"));
-        assert_eq!(scene.nodes[0].behavior, None);
-        assert_eq!(scene.nodes[1].behavior.as_deref(), Some("slime"));
+        // `behavior` first, then each of `behaviors` that picks one for the record.
+        assert_eq!(scene.nodes[0].behaviors, ["solid", "slime"]);
+        assert_eq!(scene.nodes[1].behaviors, ["slime", "solid"]);
+        assert!(scene.nodes[2].behaviors.is_empty());
         // (24 + 100, 8) pixels at 16 per meter.
         assert_eq!(scene.nodes[0].position, [7.75, 0.0, 0.5]);
         assert_eq!(

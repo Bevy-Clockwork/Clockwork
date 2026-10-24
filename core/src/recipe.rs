@@ -113,7 +113,10 @@ pub enum Step {
     /// Decodes text from buffer `from`, starting at byte `at` and stopping at byte `end` (or
     /// after `length` bytes, for text of a fixed size), into buffer `into` (UTF-8). Each byte means the text `codes` gives it, else the character of
     /// a run: `(first, "ABC")` makes `first` "A", `first + 1` "B" and so on. A byte neither
-    /// names is an error, unless `other` says what it means.
+    /// names is an error, unless `other` says what it means. Control codes followed by
+    /// parameter bytes (a colour, a sound, a number) are listed in `params` with how many: the
+    /// parameters are skipped, and the code itself means what `codes` gives it (nothing if it
+    /// gives nothing), so a parameter of 0 doesn't end the text.
     Text {
         from: String,
         #[serde(default)]
@@ -122,6 +125,8 @@ pub enum Step {
         runs: Vec<(u8, String)>,
         #[serde(default)]
         codes: BTreeMap<u8, String>,
+        #[serde(default)]
+        params: BTreeMap<u8, u8>,
         end: u8,
         #[serde(default)]
         length: Option<u32>,
@@ -282,6 +287,10 @@ pub enum Step {
         /// enemy's actor by its kind field.
         #[serde(default)]
         behavior: Option<Box<PlaceItem>>,
+        /// More `Behavior` outputs each placement does, each picked like `behavior` (a person
+        /// who talks and is solid); a pick that finds none adds nothing.
+        #[serde(default)]
+        behaviors: Vec<PlaceItem>,
         /// What `MarkPlaces` writes into the cells: this field's value, else the record's number
         /// from 1.
         #[serde(default)]
