@@ -4,6 +4,8 @@
 
 ### Added
 
+- `times` and `plus` on record fields: the number read is scaled, so records that keep
+  positions in tiles (`x + y * 64`) place things in pixels without per-record origins.
 - Scripts: the effect `Run` starts commands that run over time (`Do`, `Wait`, `Until`, `Walk`,
   `Place`, `Hold`, `If`, `Repeat`, `End`), for cutscenes and events. A script can hold the
   player still, and nodes it walks take their behaviors along. The Inspector edits scripts, and
