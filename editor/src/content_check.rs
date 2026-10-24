@@ -160,7 +160,7 @@ mod tests {
                 to: "Hall".into(),
                 fade: 0.0,
             }));
-        let entities = Entities::build(&scene, |_| Vec3::ZERO);
+        let entities = crate::entities::build(&scene);
         let names: Vec<&str> = scene.nodes.iter().map(|n| n.name.as_str()).collect();
         let goal = Goal::When(Condition::Gone("Star".into()));
         assert_eq!(

@@ -110,19 +110,7 @@ impl SpriteCache {
     }
 }
 
-/// Something a character holds now, as Play mode sees it.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Held {
-    /// A sprite output of the character's plugin.
-    pub sprite: String,
-    pub frames: AttachmentFrames,
-    pub behind: bool,
-    pub facing: Direction4,
-    /// Seconds since the action started, for attachments with their own animation.
-    pub seconds: f32,
-    /// The frame shown by a 3D character, which it can't follow frame by frame.
-    pub still: Option<usize>,
-}
+pub use clockwork_runtime::play::fighter::Held;
 
 /// A sprite shown by a scene node, and what it plays.
 #[derive(Component)]

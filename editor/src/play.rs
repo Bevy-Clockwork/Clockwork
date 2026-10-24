@@ -1,37 +1,34 @@
-//! Play mode: drive a character around the scene with the runtime's generic controller.
+//! Play mode: drive a character around the scene. The runtime plays it
+//! (`clockwork_runtime::play`); this hands it the scene, the extracted content and the input,
+//! and shows what it does: the played node's entity, its animation, the camera, the HUD and
+//! what happened.
 //!
 //! The scene itself is never changed while playing: the played node's entity is moved directly,
 //! and stopping lets the scene's own transform take over again.
 
+use std::sync::LazyLock;
+
 use bevy::{math::Affine3A, prelude::*};
-use clockwork_core::{
-    action::Moves,
-    character::Character,
-    character2d::Character2d,
-    character2d::Direction4,
-    game::{self, Goal, Rules, WhenDown},
-    item::Slot,
-    parts::{self, Stats},
-    surface::SurfaceMap,
-    surface::SurfaceProperty,
-    ui::Words,
-};
+use clockwork_core::{action::Moves, character2d::Direction4, game, parts, ui::Words};
 use clockwork_recipe::assets::AssetIndex;
 use clockwork_runtime::{
     billboard::{self, Body25d},
-    controller::{self, Body, Ground, Input, World},
+    controller::{self, Body},
     hud::HudRequest,
     input::{GameButton, GameInput},
     inventory::Inventory,
-    terrain::WorldTerrain,
+    play::{
+        Area, Avatar, BillboardBody, Controls, Frame, Happened, Level, ModelBody, Play, STEP,
+        SpriteBody,
+        fighter::{Buttons, Fighter, Held},
+    },
     topdown::{self, Body2d},
 };
 
-use clockwork_core::{asset, camera, character::FollowCamera, recipe::Output};
+use clockwork_core::{asset, camera, recipe::Output};
 
 use crate::{
-    entities::{Effect, Entities, Touch},
-    fighting::{Buttons, Fighter},
+    entities::Entities,
     models::Rig,
     scene::NodeId,
     sprites::SpriteRig,
@@ -40,421 +37,90 @@ use crate::{
     workshop::{Extractions, NodeImage, OrbitCamera, SceneView, surfaces_for},
 };
 
-/// The simulation steps at a fixed rate, so movement doesn't depend on the frame rate.
-const STEP: f32 = 1.0 / 60.0;
-/// How long a jump press is remembered while it can't be used yet, in seconds.
-const JUMP_BUFFER: f32 = 0.15;
-
 /// The camera looks at this point above the character's feet.
 const CAMERA_HEIGHT: f32 = 0.8;
 
 #[derive(Resource, Default)]
 pub struct PlaySession {
-    /// The played character, while playing.
-    played: Option<Played>,
-    /// What the scene's behaviors are doing while playing.
-    entities: Entities,
+    /// The played character and the scene's behaviors, while playing.
+    play: Option<Play>,
     /// A dialog to show once its plugin is extracted: one whose pages come from the ROM.
     waiting_dialog: Option<clockwork_core::asset::OutputRef>,
 }
 
-/// The played character: what every kind has (its fighting, health and time), and its body,
-/// which its movement asset's kind decides.
-struct Played {
-    node: NodeId,
-    /// Simulation time not stepped yet.
-    leftover: f32,
-    fighter: Fighter,
-    vitals: Vitals,
-    body: PlayedBody,
-    /// Where it started.
-    origin: Vec3,
-    rules: Rules,
-    /// Lives and seconds left, when the rules count them.
-    lives: Option<u32>,
-    time_left: Option<f32>,
-    /// A door's fade going on.
-    fade: Option<Fade>,
-    /// The goal is reached: the game stands still.
-    won: bool,
-}
-
-/// The screen fading out and in on the way through a door.
-struct Fade {
-    elapsed: f32,
-    total: f32,
-    to: Vec3,
-    moved: bool,
-}
-
-impl Fade {
-    /// How dark the screen is, 0 to 1: dark halfway.
-    fn darkness(&self) -> f32 {
-        1.0 - (self.elapsed / (self.total / 2.0) - 1.0).abs().min(1.0)
-    }
-}
-
-/// Health while playing, and how long the character can't be hurt again.
-#[derive(Clone, Copy, Debug)]
-pub struct Vitals {
-    pub health: f32,
-    pub max: f32,
-    pub hurt_time: f32,
-    /// Seconds left in which it can't be hurt.
-    pub safe: f32,
-}
-
-impl Vitals {
-    fn new(stats: Stats) -> Self {
-        Self {
-            health: stats.health,
-            max: stats.health,
-            hurt_time: stats.hurt_time,
-            safe: 0.0,
-        }
-    }
-
-    /// Takes `damage` unless just hurt; returns whether health ran out.
-    pub fn hurt(&mut self, damage: f32) -> bool {
-        if self.safe > 0.0 || damage <= 0.0 {
-            return false;
-        }
-        self.health = (self.health - damage).max(0.0);
-        self.safe = self.hurt_time;
-        self.health <= 0.0
-    }
-
-    pub fn heal(&mut self, amount: f32) {
-        self.health = (self.health + amount).min(self.max);
-    }
-}
-
-/// How the played character moves and is shown.
-enum PlayedBody {
-    /// A 3D character running and jumping.
-    Model(Box<ModelBody>),
-    /// A sprite walking on a map seen from above.
-    TopDown(Box<SpriteBody>),
-    /// A sprite standing upright in a 3D world (2.5D), walking on its floors.
-    Billboard(Box<BillboardBody>),
-}
-
-struct ModelBody {
-    body: Body,
-    character: Character,
-    /// Seconds a jump press stays waiting to be used. Frames often render without a step (the
-    /// display is faster than the simulation), and a press made a moment too early (in the
-    /// air just before landing, or as an attack ends) should still jump.
-    jump_buffer: f32,
-    /// The bone the character leans with.
-    lean_bone: Option<usize>,
-    /// The action shown last, so a new one starts its animation from the beginning.
-    last_action: Option<String>,
-    /// The camera following it, if any (see [`played_camera`]).
-    camera: Option<FollowCamera>,
-}
-
-struct SpriteBody {
-    body: Body2d,
-    character: Character2d,
-    /// Where it starts again.
-    start: Vec3,
-}
-
-struct BillboardBody {
-    body: Body25d,
-    character: Character2d,
-}
-
-/// One simulation step's input.
-struct StepInput {
-    /// The stick as seen on screen, and the ground direction it points.
-    stick: Vec2,
-    direction: Vec2,
-    walk: bool,
-    jump: bool,
-    held: bool,
-    /// Where the camera looks.
-    yaw: f32,
-}
-
-impl PlayedBody {
-    fn position(&self) -> Vec3 {
-        match self {
-            PlayedBody::Model(m) => m.body.position,
-            PlayedBody::TopDown(s) => s.body.position,
-            PlayedBody::Billboard(b) => b.body.position,
-        }
-    }
-
-    fn radius(&self) -> f32 {
-        match self {
-            PlayedBody::Model(m) => m.character.movement.radius,
-            PlayedBody::TopDown(s) => s.character.movement.radius,
-            PlayedBody::Billboard(b) => b.character.movement.radius,
-        }
-    }
-
-    fn teleport(&mut self, at: Vec3) {
-        match self {
-            PlayedBody::Model(m) => m.body.position = at,
-            PlayedBody::TopDown(s) => s.body.position = at,
-            PlayedBody::Billboard(b) => b.body.position = at,
-        }
-    }
-
-    /// Where it starts again from now on.
-    fn checkpoint(&mut self, at: Vec3) {
-        match self {
-            PlayedBody::Model(m) => m.body.start = at,
-            PlayedBody::TopDown(s) => s.start = at,
-            PlayedBody::Billboard(b) => b.body.start = at,
-        }
-    }
-
-    fn start_over(&mut self) {
-        match self {
-            PlayedBody::Model(m) => m.body.position = m.body.start,
-            PlayedBody::TopDown(s) => s.body.position = s.start,
-            PlayedBody::Billboard(b) => b.body.position = b.body.start,
-        }
-    }
-
-    /// Advances one simulation step: the action first (it says how movement is constrained),
-    /// then the controller of its kind.
-    fn step(&mut self, fighter: &mut Fighter, world: &SceneWorld, input: &StepInput) {
-        match self {
-            PlayedBody::Billboard(b) => {
-                let modifiers = fighter.step(
-                    world,
-                    STEP,
-                    b.body.position,
-                    b.body.facing,
-                    b.body.walking,
-                    input.yaw,
-                );
-                // The facing follows the stick as seen on screen, the movement the ground
-                // direction.
-                billboard::step_with(
-                    &mut b.body,
-                    input.stick,
-                    input.direction,
-                    &b.character.movement,
-                    world,
-                    STEP,
-                    &modifiers,
-                );
-            }
-            PlayedBody::TopDown(s) => {
-                let modifiers = fighter.step(
-                    world,
-                    STEP,
-                    s.body.position,
-                    s.body.facing,
-                    s.body.walking,
-                    0.0,
-                );
-                topdown::step_with(
-                    &mut s.body,
-                    input.direction,
-                    &s.character.movement,
-                    world,
-                    STEP,
-                    &modifiers,
-                );
-            }
-            PlayedBody::Model(m) => {
-                // Actions see the character's own forward direction: facing north for a camera
-                // that looks the way the character does (the camera at yaw + half a turn looks
-                // along it).
-                let modifiers = fighter.step(
-                    world,
-                    STEP,
-                    m.body.position,
-                    Direction4::North,
-                    input.direction.length() > 0.0,
-                    m.body.yaw + std::f32::consts::PI,
-                );
-                // What the action allows: slower, no input at all, or a slide whatever the input.
-                let mut steer = input.direction * modifiers.speed_factor;
-                if modifiers.locked {
-                    steer = Vec2::ZERO;
-                }
-                if let Some(slide) = modifiers.slide {
-                    steer = slide.normalize_or_zero();
-                }
-                let busy = modifiers.locked || modifiers.slide.is_some();
-                let step_input = Input {
-                    direction: steer,
-                    walk: input.walk,
-                    jump_pressed: m.jump_buffer > 0.0 && !busy,
-                    jump_held: (input.held || input.jump) && !busy,
-                };
-                let jumped =
-                    controller::step(&mut m.body, &step_input, &m.character.movement, world, STEP);
-                // A press waits out a busy action or the end of a fall, but not forever.
-                m.jump_buffer = if jumped {
-                    0.0
-                } else {
-                    (m.jump_buffer - STEP).max(0.0)
-                };
-            }
-        }
-    }
-}
+/// The behaviors while nothing is played.
+static NO_ENTITIES: LazyLock<Entities> = LazyLock::new(Entities::default);
 
 impl PlaySession {
     /// The scene's behaviors while playing (empty otherwise).
     pub fn entities(&self) -> &Entities {
-        &self.entities
+        self.play.as_ref().map_or(&NO_ENTITIES, |p| &p.entities)
+    }
+
+    /// The scene's behaviors while playing, to put a save file into.
+    pub fn entities_mut(&mut self) -> Option<&mut Entities> {
+        self.play.as_mut().map(|p| &mut p.entities)
     }
 
     /// Chooses an act and judges conditions with the current inventory, keeping play progress.
     pub fn set_act(&mut self, act: Option<u8>) {
-        self.entities.set_act(act);
-        let carried = |item: &str| {
-            self.played
-                .as_ref()
-                .and_then(|p| p.fighter.inventory.as_ref())
-                .map_or(0, |i| i.count(item))
-        };
-        self.entities.refresh(&carried);
+        if let Some(play) = &mut self.play {
+            play.set_act(act);
+        }
     }
 
     /// The played character's fighting state, if one is played.
     pub fn fighter(&self) -> Option<&Fighter> {
-        self.played.as_ref().map(|p| &p.fighter)
+        self.play.as_ref().map(|p| &p.fighter)
     }
 
     /// Whether the played character is in a 3D view: a 3D character, or a 2D one standing
     /// upright in a 3D world (2.5D), rather than a sprite lying on a map seen from above.
     pub fn in_3d(&self) -> bool {
-        self.played
-            .as_ref()
-            .is_some_and(|p| !matches!(p.body, PlayedBody::TopDown(_)))
+        self.play.as_ref().is_some_and(Play::in_3d)
     }
 
     /// The played 3D character's node, what it holds and the bone it holds it at.
-    pub fn held_at_hand(&self) -> Option<(NodeId, Vec<crate::sprites::Held>, Option<&str>)> {
-        let played = self.played.as_ref()?;
-        let PlayedBody::Model(m) = &played.body else {
+    pub fn held_at_hand(&self) -> Option<(NodeId, Vec<Held>, Option<&str>)> {
+        let play = self.play.as_ref()?;
+        let Avatar::Model(m) = &play.avatar else {
             return None;
         };
-        Some((
-            played.node,
-            played.fighter.held(),
-            m.character.hand.as_deref(),
-        ))
+        Some((play.node, play.fighter.held(), m.character.hand.as_deref()))
     }
 
     /// Where the played character stands.
     pub fn position(&self) -> Option<Vec3> {
-        self.played.as_ref().map(|p| p.body.position())
+        self.play.as_ref().map(Play::position)
     }
 
     /// Moves the played character (backing out of a course, a save file's start).
     pub fn teleport(&mut self, at: Vec3) {
-        if let Some(played) = &mut self.played {
-            played.body.teleport(at);
+        if let Some(play) = &mut self.play {
+            play.teleport(at);
         }
     }
 
     /// Moves the played character to where the game starts, and makes it the place it starts
     /// over from.
     pub fn start_at(&mut self, at: Vec3) {
-        if let Some(played) = &mut self.played {
-            played.body.teleport(at);
-            played.origin = at;
+        if let Some(play) = &mut self.play {
+            play.start_at(at);
         }
     }
 
     /// What the played character carries, once its items are there.
     pub fn inventory(&self) -> Option<&Inventory> {
-        self.played.as_ref()?.fighter.inventory.as_ref()
+        self.play.as_ref()?.inventory()
     }
 
     pub fn inventory_mut(&mut self) -> Option<&mut Inventory> {
-        self.played.as_mut()?.fighter.inventory.as_mut()
-    }
-
-    /// The scene's behaviors while playing, to put a save file into.
-    pub fn entities_mut(&mut self) -> &mut Entities {
-        &mut self.entities
+        self.play.as_mut()?.inventory_mut()
     }
 
     /// The played character's state in one line, for the remote control's reports.
     pub fn describe(&self) -> Option<String> {
-        let played = self.played.as_ref()?;
-        let f = &played.fighter;
-        let slot = |s: Slot| {
-            f.inventory
-                .as_ref()
-                .and_then(|i| i.equipped(s))
-                .map_or("-".to_string(), |item| item.id.clone())
-        };
-        let tail = format!(
-            " | health {}/{} | B {} A {} | action {} | started {} hits {} spawned {} bursts {} projectiles {}{}",
-            played.vitals.health,
-            played.vitals.max,
-            slot(Slot::B),
-            slot(Slot::A),
-            f.pose.as_ref().map_or("-", |p| p.0.as_str()),
-            recent(&f.stats.started),
-            f.stats.hits,
-            recent(&f.stats.spawned),
-            f.stats.bursts,
-            f.projectiles.iter().count(),
-            if f.invulnerable { " invulnerable" } else { "" }
-        );
-        Some(match &played.body {
-            PlayedBody::Billboard(s) => {
-                let (animation, time) = billboard::pose(&s.body, &s.character.animations);
-                format!(
-                    "{:?} (billboard) speed {:.2} {} at ({:.2}, {:.2}, {:.2}) animation {}{} at {:.2} s{tail}",
-                    s.body.facing,
-                    s.body.speed,
-                    if s.body.grounded {
-                        "grounded"
-                    } else {
-                        "airborne"
-                    },
-                    s.body.position.x,
-                    s.body.position.y,
-                    s.body.position.z,
-                    animation.name,
-                    if animation.flip_x { " (mirrored)" } else { "" },
-                    time
-                )
-            }
-            PlayedBody::TopDown(s) => {
-                let (animation, time) = topdown::pose(&s.body, &s.character.animations);
-                format!(
-                    "{:?} speed {:.2} at ({:.2}, {:.2}, {:.2}) animation {}{} at {:.2} s{tail}",
-                    s.body.facing,
-                    s.body.speed,
-                    s.body.position.x,
-                    s.body.position.y,
-                    s.body.position.z,
-                    animation.name,
-                    if animation.flip_x { " (mirrored)" } else { "" },
-                    time
-                )
-            }
-            PlayedBody::Model(m) => {
-                let b = &m.body;
-                format!(
-                    "{:?} speed {:.2} vertical {:.2} at ({:.2}, {:.2}, {:.2}) yaw {:.0}° animation {}{tail}",
-                    b.state,
-                    b.speed,
-                    b.vertical,
-                    b.position.x,
-                    b.position.y,
-                    b.position.z,
-                    b.yaw.to_degrees(),
-                    b.last_animation
-                )
-            }
-        })
+        self.play.as_ref().map(Play::describe)
     }
 }
 
@@ -474,106 +140,6 @@ pub struct ScriptedInput {
     pub a_press: bool,
     pub b_press: bool,
     pub dodge_press: bool,
-}
-
-/// An area of the scene the character can stand on: its image plane and surface map.
-struct Area<'a> {
-    to_local: Affine3A,
-    size: Vec2,
-    height: f32,
-    map: &'a SurfaceMap,
-}
-
-struct SceneWorld<'a> {
-    areas: Vec<Area<'a>>,
-    terrains: Vec<&'a WorldTerrain>,
-    /// Obstacles placed in the scene.
-    entities: &'a Entities,
-}
-
-impl World for SceneWorld<'_> {
-    fn ground(&self, x: f32, z: f32) -> Ground {
-        if self.entities.blocked(Vec2::new(x, z)) {
-            return Ground::Wall;
-        }
-        // The highest area under the point decides; outside every area there is nothing.
-        let mut best: Option<(f32, Ground)> = None;
-        for area in &self.areas {
-            let local = area.to_local.transform_point3(Vec3::new(x, area.height, z));
-            let u = (local.x + area.size.x / 2.0) / area.size.x;
-            let v = (local.z + area.size.y / 2.0) / area.size.y;
-            if !(0.0..1.0).contains(&u) || !(0.0..1.0).contains(&v) {
-                continue;
-            }
-            let map = area.map;
-            let (fx, fy) = (u * map.width as f32, v * map.height as f32);
-            let ground = match map.kind_at(fx as u32, fy as u32) {
-                None => Ground::Hole,
-                Some(kind) => {
-                    cell_ground(map, &kind.properties, fx.fract(), fy.fract(), area.height)
-                }
-            };
-            if best.as_ref().is_none_or(|(h, _)| area.height > *h) {
-                best = Some((area.height, ground));
-            }
-        }
-        best.map_or(Ground::Hole, |(_, g)| g)
-    }
-
-    fn ground_at(&self, x: f32, y: f32, z: f32) -> Ground {
-        if self.entities.blocked(Vec2::new(x, z)) {
-            return Ground::Wall;
-        }
-        let flat = self.ground(x, z);
-        // The highest floor of any 3D area at the body's height; holes only if there is no floor.
-        let mut terrain: Option<Ground> = None;
-        for found in self.terrains.iter().filter_map(|t| t.floor(x, y, z)) {
-            terrain = match (terrain, found) {
-                (Some(Ground::Floor(a)), Ground::Floor(b)) => Some(Ground::Floor(a.max(b))),
-                (Some(Ground::Floor(a)), _) => Some(Ground::Floor(a)),
-                (_, found) => Some(found),
-            };
-        }
-        match (flat, terrain) {
-            (Ground::Wall, _) => Ground::Wall,
-            (Ground::Floor(a), Some(Ground::Floor(b))) => Ground::Floor(a.max(b)),
-            (Ground::Floor(a), _) => Ground::Floor(a),
-            (Ground::Hole, Some(found)) => found,
-            (Ground::Hole, None) => Ground::Hole,
-        }
-    }
-
-    fn push_out(&self, position: Vec3, radius: f32) -> Vec3 {
-        self.terrains
-            .iter()
-            .fold(position, |p, t| t.push_out(p, radius))
-    }
-}
-
-/// What a cell is at a point inside it (fx, fy in 0..1 across the cell).
-fn cell_ground(
-    map: &SurfaceMap,
-    properties: &[SurfaceProperty],
-    fx: f32,
-    fy: f32,
-    height: f32,
-) -> Ground {
-    let properties = map.resolve(properties);
-    let mut ground = Ground::Floor(height);
-    for p in &properties {
-        match p {
-            SurfaceProperty::Solid => return Ground::Wall,
-            SurfaceProperty::SolidParts(mask) => {
-                let bit = (fx >= 0.5) as u8 + 2 * (fy >= 0.5) as u8;
-                if mask & (1 << bit) != 0 {
-                    return Ground::Wall;
-                }
-            }
-            SurfaceProperty::FallThrough => ground = Ground::Hole,
-            _ => {}
-        }
-    }
-    ground
 }
 
 /// Starts and stops Play mode, and moves the played character.
@@ -597,7 +163,7 @@ pub fn play_system(
     mut flow: ResMut<crate::flow_play::FlowState>,
 ) {
     match state.workshop.play_request.take() {
-        Some(true) if session.played.is_none() => {
+        Some(true) if session.play.is_none() => {
             start(
                 &mut state,
                 &mut session,
@@ -621,7 +187,7 @@ pub fn play_system(
             state.workshop.game_view = flow.is_game();
         }
         Some(false) => {
-            if let Some(played) = session.played.take() {
+            if let Some(played) = session.play.take() {
                 for mut rig in &mut rigs {
                     if rig.node == played.node {
                         rig.playback = None;
@@ -652,16 +218,15 @@ pub fn play_system(
             state.workshop.hidden_in_play.clear();
             state.workshop.toast = None;
             state.workshop.play_clock = Default::default();
-            session.entities = Entities::default();
         }
         _ => {}
     }
-    let Some(played) = session.played.as_ref().map(|p| p.node) else {
+    let Some(played) = session.play.as_ref().map(|p| p.node) else {
         return;
     };
     // The theme's font and frame, and the items, once their plugins are extracted.
     crate::play_kit::complete_screen(&mut state, &mut extractions);
-    if let Some(played) = &mut session.played {
+    if let Some(played) = &mut session.play {
         complete_inventory(&mut played.fighter, &mut extractions, &mut state);
     }
     if let Some(at) = session.waiting_dialog.clone() {
@@ -682,7 +247,7 @@ pub fn play_system(
     }
     // The node or its item disappeared (deleted, undone): stop.
     if state.workshop.scene.get(played).is_none() {
-        session.played = None;
+        session.play = None;
         state.workshop.playing = None;
         state.workshop.game_view = false;
         return;
@@ -696,7 +261,7 @@ pub fn play_system(
         || state.workshop.dialog.is_some()
         || flow.frozen()
         || session
-            .played
+            .play
             .as_ref()
             .is_some_and(|p| p.fade.is_some() || p.won);
     let (stick, walk, jump, held) = if scripted.frames > 0 {
@@ -757,7 +322,7 @@ pub fn play_system(
     let frozen = state.workshop.menu_paused
         || state.workshop.dialog.is_some()
         || flow.frozen()
-        || session.played.as_ref().is_some_and(|p| p.won);
+        || session.play.as_ref().is_some_and(|p| p.won);
     let sim_dt = if frozen { 0.0 } else { sim_dt };
     if let Some((_, left)) = &mut state.workshop.toast {
         *left -= time.delta_secs();
@@ -766,8 +331,6 @@ pub fn play_system(
         }
     }
     let requests = std::mem::take(&mut state.workshop.hud_requests);
-    // The pause menu's "Start over" and "Stop playing".
-    let start_over = requests.contains(&HudRequest::Restart);
     // The dialog's next page, or closing it after the last.
     if requests.contains(&HudRequest::NextPage)
         && let Some((dialog, page)) = &mut state.workshop.dialog
@@ -800,181 +363,86 @@ pub fn play_system(
             })
         })
         .collect();
-    state.workshop.live = live_lines(&session, &state);
-    let session = &mut *session;
-    let world = SceneWorld {
+    let level = Level {
         areas,
         terrains: terrains.all(),
-        entities: &session.entities,
     };
-    let Some(played) = &mut session.played else {
+    state.workshop.live = live_lines(&session, &state);
+    let session = &mut *session;
+    let Some(played) = &mut session.play else {
         return;
     };
-
-    // Every kind alike: the buttons, the steps, the scene's behaviors and what they did.
-    if let PlayedBody::Model(m) = &mut played.body
-        && jump
-    {
-        m.jump_buffer = JUMP_BUFFER;
-    }
-    played.fighter.feed(&buttons, &requests);
-    played.leftover += sim_dt;
-    let step_input = StepInput {
-        stick,
-        direction,
-        walk,
-        jump,
-        held,
-        yaw: orbit.yaw,
+    let frame = Frame {
+        controls: Controls {
+            stick,
+            direction,
+            walk,
+            jump,
+            held,
+            yaw: orbit.yaw,
+            buttons,
+        },
+        requests,
+        sim_dt,
+        dt: time.delta_secs(),
+        screen: flow.frozen(),
+        game_over_screen: flow.has_game_over(),
     };
-    while played.leftover >= STEP {
-        played.leftover -= STEP;
-        played.body.step(&mut played.fighter, &world, &step_input);
-    }
-    played.vitals.safe = (played.vitals.safe - sim_dt).max(0.0);
-    let projectiles = played.fighter.moves.projectiles.clone();
-    // Behind a screen (the title, choosing a file or an act) nothing is touched.
-    let outcome = if flow.frozen() {
-        EntityOutcome::default()
-    } else {
-        run_entities(
-            &mut session.entities,
-            Some(&mut played.fighter),
-            &projectiles,
-            played.body.position(),
-            played.body.radius(),
-            sim_dt,
-            &mut state,
-        )
-    };
-    if let Some(at) = outcome.teleport {
-        played.body.teleport(at);
-    }
-    // Arriving in a course asks which act to play.
-    if let Some(name) = &outcome.arrived {
-        flow.arrived(name, played.body.position());
-    }
-    if outcome.dialog.is_some() {
-        session.waiting_dialog = outcome.dialog;
-    }
-    if let Some(at) = outcome.checkpoint {
-        played.body.checkpoint(at);
-    }
-    if outcome.restart || start_over {
-        played.body.start_over();
-    }
-    played.vitals.heal(outcome.heal);
-    // A door: the screen fades out, the player moves, it fades back in.
-    if let Some((to, fade)) = outcome.door
-        && played.fade.is_none()
-    {
-        played.fade = Some(Fade {
-            elapsed: 0.0,
-            total: fade.max(0.01),
-            to,
-            moved: false,
-        });
-    }
-    if let Some(fade) = &mut played.fade {
-        fade.elapsed += time.delta_secs();
-        if !fade.moved && fade.elapsed >= fade.total / 2.0 {
-            played.body.teleport(fade.to);
-            fade.moved = true;
-        }
-    }
-    state.workshop.fade = played
-        .fade
-        .as_ref()
-        .map_or(0, |f| (f.darkness() * 16.0).round() as u8);
-    if played.fade.as_ref().is_some_and(|f| f.elapsed >= f.total) {
-        played.fade = None;
-    }
-    // The rules: out of health or out of time is going down.
-    let health_before = played.vitals.health;
-    let mut down = played.vitals.hurt(outcome.damage);
-    if played.vitals.health < health_before {
-        let sound = state.workshop.kit_sounds.hurt.clone();
-        state.workshop.sounds.extend(sound);
-    }
-    if outcome.door.is_some() {
-        let sound = state.workshop.kit_sounds.door.clone();
-        state.workshop.sounds.extend(sound);
-    }
-    if outcome.picked {
-        let sound = state.workshop.kit_sounds.pickup.clone();
-        state.workshop.sounds.extend(sound);
-    }
-    if let Some(left) = &mut played.time_left {
-        *left -= sim_dt;
-        if *left <= 0.0 {
-            down = true;
-            *left = played.rules.time_limit.unwrap_or_default();
-        }
-    }
-    if down {
-        let game_over = played.lives.is_some_and(|l| l <= 1);
-        if let Some(lives) = &mut played.lives {
-            *lives = lives.saturating_sub(1);
-        }
-        played.vitals.health = played.vitals.max;
-        if game_over && flow.game_over() {
-            // The game's own game over screen; continuing starts Play again.
-        } else if game_over {
-            played.lives = played.rules.lives;
-            played.time_left = played.rules.time_limit;
-            played.body.teleport(played.origin);
-            state.workshop.toast = toast(&words(&state).game_over);
-        } else {
-            match played.rules.when_down {
-                WhenDown::StartOver => played.body.teleport(played.origin),
-                WhenDown::LastCheckpoint => played.body.start_over(),
-                WhenDown::StopPlaying => state.workshop.play_request = Some(false),
-            }
-            state.workshop.toast = toast(&words(&state).down);
-        }
-    }
-    // The goal.
-    if !played.won
-        && let Some(goal) = &played.rules.goal
-    {
-        let reached = match goal {
-            Goal::Collect { item, count } => played
-                .fighter
-                .inventory
-                .as_ref()
-                .is_some_and(|i| i.count(item) >= *count),
-            Goal::Reach(name) => state
-                .workshop
-                .scene
+    let words = words(&state);
+    let happened = {
+        let scene = &state.workshop.scene;
+        let places = |name: &str| {
+            scene
                 .nodes
                 .iter()
-                .find(|n| n.name == *name)
-                .is_some_and(|n| {
-                    let at = state.workshop.scene.world_transform(n.id).translation;
-                    let here = played.body.position();
-                    Vec2::new(at.x - here.x, at.z - here.z).length() <= played.body.radius() + 0.5
-                }),
-            Goal::DestroyAll => {
-                let targets = session
-                    .entities
-                    .live
-                    .iter()
-                    .filter(|e| matches!(e.behavior, crate::entities::Behavior::Target { .. }));
-                targets.clone().count() > 0 && targets.into_iter().all(|e| e.gone)
-            }
-            Goal::When(condition) => {
-                let inventory = played.fighter.inventory.as_ref();
-                session
-                    .entities
-                    .holds(condition, &|item| inventory.map_or(0, |i| i.count(item)))
-            }
+                .find(|n| n.name == name)
+                .map(|n| scene.world_transform(n.id).translation)
         };
-        if reached {
-            played.won = true;
-            let win = words(&state).win;
-            state.workshop.banner = (!win.is_empty()).then_some(win);
+        played.advance(&frame, &level, &places, &words)
+    };
+    for event in happened {
+        match event {
+            Happened::Notice(text) => {
+                state.log(LogLevel::Info, text.clone());
+                state.workshop.toast = Some((text, 3.0));
+            }
+            Happened::Toast(text) => state.workshop.toast = Some((text, 3.0)),
+            Happened::Problem(text) => state.log(LogLevel::Warn, text),
+            Happened::Say(dialog) => {
+                if let Some(at) = show_dialog(dialog, &mut state) {
+                    session.waiting_dialog = Some(at);
+                }
+            }
+            Happened::Sound(name) => match asset::OutputRef::parse(&name) {
+                Some(at) => state.workshop.sounds.push(at),
+                None => state.log(
+                    LogLevel::Warn,
+                    format!("\"{name}\" is not \"plugin/output\""),
+                ),
+            },
+            // Arriving in a course asks which act to play.
+            Happened::Arrived { name, from } => flow.arrived(&name, from),
+            Happened::Hurt => {
+                let sound = state.workshop.kit_sounds.hurt.clone();
+                state.workshop.sounds.extend(sound);
+            }
+            Happened::Door => {
+                let sound = state.workshop.kit_sounds.door.clone();
+                state.workshop.sounds.extend(sound);
+            }
+            Happened::Picked => {
+                let sound = state.workshop.kit_sounds.pickup.clone();
+                state.workshop.sounds.extend(sound);
+            }
+            Happened::GameOver => {
+                flow.game_over();
+            }
+            Happened::Stop => state.workshop.play_request = Some(false),
+            Happened::Won(win) => state.workshop.banner = (!win.is_empty()).then_some(win),
         }
     }
+    state.workshop.hidden_in_play = played.entities.hidden().collect();
+    state.workshop.fade = (played.darkness() * 16.0).round() as u8;
     state.workshop.lives = played.lives;
     state.workshop.seconds = played.time_left.map(|t| t.ceil().max(0.0) as u32);
     let fights = !played.fighter.moves.actions.is_empty() || played.fighter.inventory.is_some();
@@ -1004,8 +472,8 @@ pub fn play_system(
         }
     };
     let dt = time.delta_secs();
-    match &mut played.body {
-        PlayedBody::Billboard(b) => {
+    match &mut played.avatar {
+        Avatar::Billboard(b) => {
             let (animation, seconds) = billboard::pose(&b.body, &b.character.animations);
             let shown =
                 fighter
@@ -1030,7 +498,7 @@ pub fn play_system(
                 1.0 - (-8.0 * dt).exp(),
             );
         }
-        PlayedBody::TopDown(s) => {
+        Avatar::TopDown(s) => {
             let (animation, seconds) = topdown::pose(&s.body, &s.character.animations);
             let shown =
                 fighter
@@ -1052,7 +520,7 @@ pub fn play_system(
             orbit.focus = orbit.focus.lerp(s.body.position, 1.0 - (-8.0 * dt).exp());
             orbit.yaw = 0.0;
         }
-        PlayedBody::Model(m) => {
+        Avatar::Model(m) => {
             let finished = rigs
                 .iter()
                 .find(|r| r.node == node)
@@ -1180,10 +648,7 @@ fn start(
         .map(|n| n.name.clone())
         .unwrap_or_default();
     let world = state.workshop.scene.world_transform(node);
-    {
-        let scene = &state.workshop.scene;
-        session.entities = Entities::build(scene, |id| scene.world_transform(id).translation);
-    }
+    let entities = crate::entities::build(&state.workshop.scene);
     state.workshop.hidden_in_play.clear();
     state.workshop.play_clock = Default::default();
 
@@ -1214,7 +679,7 @@ fn start(
                 distance: camera.distance,
             };
             (
-                PlayedBody::Billboard(Box::new(BillboardBody {
+                Avatar::Billboard(Box::new(BillboardBody {
                     body: Body25d::new(position, Direction4::South),
                     character: character.clone(),
                 })),
@@ -1242,7 +707,7 @@ fn start(
                 distance: camera.distance,
             };
             (
-                PlayedBody::TopDown(Box::new(SpriteBody {
+                Avatar::TopDown(Box::new(SpriteBody {
                     body: Body2d::new(world.translation, Direction4::South),
                     start: world.translation,
                     character: character.clone(),
@@ -1287,7 +752,7 @@ fn start(
                 };
             }
             (
-                PlayedBody::Model(Box::new(ModelBody {
+                Avatar::Model(Box::new(ModelBody {
                     body: Body::new(position, yaw),
                     character: character.clone(),
                     jump_buffer: 0.0,
@@ -1337,21 +802,9 @@ fn start(
     )
     .unwrap_or_default();
     let flow = crate::play_kit::flow(state);
-    crate::content_check::report(state, &session.entities, rules.goal.as_ref(), flow.as_ref());
+    crate::content_check::report(state, &entities, rules.goal.as_ref(), flow.as_ref());
     let fighter = new_fighter(extractions, state, node, moves, inventory);
-    session.played = Some(Played {
-        node,
-        leftover: 0.0,
-        fighter,
-        vitals: Vitals::new(stats),
-        origin: body.position(),
-        lives: rules.lives,
-        time_left: rules.time_limit,
-        rules,
-        fade: None,
-        won: false,
-        body,
-    });
+    session.play = Some(Play::new(node, body, fighter, stats, rules, entities));
     state.workshop.banner = None;
     state.workshop.kit_sounds = played_sounds(state, extractions, node);
     state.workshop.playing = Some(node);
@@ -1515,144 +968,6 @@ fn complete_inventory(
     );
 }
 
-/// What running the behaviors changed for the player.
-#[derive(Default)]
-struct EntityOutcome {
-    teleport: Option<Vec3>,
-    checkpoint: Option<Vec3>,
-    restart: bool,
-    damage: f32,
-    heal: f32,
-    /// A door entered: where it leads and how long the screen fades.
-    door: Option<(Vec3, f32)>,
-    /// Something was picked up.
-    picked: bool,
-    /// A dialog asset to show from its plugin's extraction.
-    dialog: Option<clockwork_core::asset::OutputRef>,
-    /// The node a door or a teleport took the player to.
-    arrived: Option<String>,
-}
-
-/// Applies the player's attacks to targets, and its position to pickups, triggers and
-/// checkpoints. `fighter` is a 2D character's fighting state, if it has one; `projectiles` are
-/// its projectile specs.
-fn run_entities(
-    entities: &mut Entities,
-    mut fighter: Option<&mut Fighter>,
-    projectiles: &[clockwork_core::action::Projectile],
-    at: Vec3,
-    radius: f32,
-    dt: f32,
-    state: &mut EditorState,
-) -> EntityOutcome {
-    let mut outcome = EntityOutcome::default();
-    let mut notices: Vec<String> = Vec::new();
-    // The player's notices are in the game's words; problems are for the author, in the log.
-    let mut problems: Vec<String> = Vec::new();
-    let words = words(state);
-    entities.update(dt);
-
-    if let Some(fighter) = fighter.as_deref_mut() {
-        for report in std::mem::take(&mut fighter.hits) {
-            let hit = entities.apply_hit(&report.shape, report.damage, report.projectile);
-            if hit.landed
-                && let Some(uid) = report.projectile
-            {
-                fighter.projectiles.on_hit(projectiles, uid);
-            }
-            for (node, drop) in hit.destroyed {
-                let name = state
-                    .workshop
-                    .scene
-                    .get(node)
-                    .map(|n| n.name.clone())
-                    .unwrap_or_default();
-                say(&mut notices, &words.destroyed, &[("name", &name)]);
-                if let Some((item, count)) = drop
-                    && let Some(inventory) = &mut fighter.inventory
-                {
-                    let added = inventory.add(&item, count);
-                    if added > 0 {
-                        let label = inventory
-                            .item(&item)
-                            .map_or(item.clone(), |i| i.name.clone());
-                        say(
-                            &mut notices,
-                            &words.got,
-                            &[("item", &label), ("n", &added.to_string())],
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    // Conditions first: what appeared, which behaviors work.
-    let carried = |item: &str| {
-        fighter
-            .as_deref()
-            .and_then(|f| f.inventory.as_ref())
-            .map_or(0, |i| i.count(item))
-    };
-    entities.refresh(&carried);
-    for touch in entities.touch(at, radius) {
-        match touch {
-            Touch::Pickup { node, item, count } => {
-                let Some(inventory) = fighter.as_deref_mut().and_then(|f| f.inventory.as_mut())
-                else {
-                    continue;
-                };
-                if inventory.add(&item, count) > 0 {
-                    entities.consume(node);
-                    outcome.picked = true;
-                    let label = inventory
-                        .item(&item)
-                        .map_or(item.clone(), |i| i.name.clone());
-                    say(
-                        &mut notices,
-                        &words.got,
-                        &[("item", &label), ("n", &count.to_string())],
-                    );
-                }
-            }
-            Touch::Checkpoint { at } => {
-                outcome.checkpoint = Some(at);
-                say(&mut notices, &words.checkpoint, &[]);
-            }
-            Touch::Hazard { damage } => outcome.damage += damage,
-            Touch::Door { to, fade } => {
-                let scene = &state.workshop.scene;
-                match scene.nodes.iter().find(|n| n.name == to) {
-                    Some(node) => {
-                        outcome.door = Some((scene.world_transform(node.id).translation, fade));
-                        outcome.arrived = Some(to);
-                    }
-                    None => problems.push(format!("No node called \"{to}\" to go to")),
-                }
-            }
-            Touch::Trigger { effect, .. } => apply_effect(
-                effect,
-                entities,
-                fighter.as_deref_mut(),
-                state,
-                &mut outcome,
-                &mut notices,
-                &words,
-            ),
-        }
-    }
-
-    for text in problems {
-        state.log(LogLevel::Warn, text);
-    }
-    for text in notices {
-        state.log(LogLevel::Info, text.clone());
-        state.workshop.toast = Some((text, 3.0));
-    }
-    state.workshop.hidden_in_play = entities.hidden().collect();
-    outcome
-}
-
 /// The words Play shows, from the played screen's HUD.
 pub(crate) fn words(state: &EditorState) -> Words {
     state
@@ -1663,119 +978,40 @@ pub(crate) fn words(state: &EditorState) -> Words {
         .unwrap_or_default()
 }
 
-/// Adds a notice in the game's words, unless the game leaves that one out (empty).
-fn say(notices: &mut Vec<String>, template: &str, values: &[(&str, &str)]) {
-    if !template.is_empty() {
-        notices.push(clockwork_core::ui::fill(template, values));
-    }
-}
-
-fn toast(text: &str) -> Option<(String, f32)> {
-    (!text.is_empty()).then(|| (text.to_string(), 3.0))
-}
-
-/// Does what a trigger's effect says.
-fn apply_effect(
-    effect: Effect,
-    entities: &mut Entities,
-    mut fighter: Option<&mut Fighter>,
+/// Shows a trigger's dialog. One whose pages come from the ROM is returned, to show once its
+/// plugin is extracted.
+fn show_dialog(
+    dialog: asset::Slot<clockwork_core::ui::Dialog>,
     state: &mut EditorState,
-    outcome: &mut EntityOutcome,
-    notices: &mut Vec<String>,
-    words: &Words,
-) {
-    match effect {
-        Effect::Message(text) => notices.push(text),
-        Effect::Restart => outcome.restart = true,
-        Effect::Hurt(amount) => outcome.damage += amount,
-        Effect::Heal(amount) => outcome.heal += amount,
-        Effect::Say(dialog) => {
-            let found = {
-                let index = AssetIndex::build(&state.workshop.plugins);
-                asset::resolve(
-                    &[(asset::Layer::Asset, Some(&dialog))],
-                    &index,
-                    "dialog",
-                    asset::dialog_of,
-                )
-            };
-            match found {
-                Ok(Some(found)) if !found.value.pages.is_empty() => {
-                    state.workshop.dialog = Some((found.value, 0));
-                }
-                // Its pages may come from the ROM: the plugin's extraction has them.
-                Ok(Some(_)) => {
-                    if let asset::Slot::Ref(at) = dialog {
-                        outcome.dialog = Some(at);
-                    }
-                }
-                Ok(_) => {}
-                Err(error) => state.log(LogLevel::Warn, format!("A dialog: {error}")),
-            }
+) -> Option<clockwork_core::asset::OutputRef> {
+    let found = {
+        let index = AssetIndex::build(&state.workshop.plugins);
+        asset::resolve(
+            &[(asset::Layer::Asset, Some(&dialog))],
+            &index,
+            "dialog",
+            asset::dialog_of,
+        )
+    };
+    match found {
+        Ok(Some(found)) if !found.value.pages.is_empty() => {
+            state.workshop.dialog = Some((found.value, 0));
+            None
         }
-        Effect::Sound(name) => match asset::OutputRef::parse(&name) {
-            Some(at) => state.workshop.sounds.push(at),
-            None => state.log(
-                LogLevel::Warn,
-                format!("\"{name}\" is not \"plugin/output\""),
-            ),
+        // Its pages may come from the ROM: the plugin's extraction has them.
+        Ok(Some(_)) => match dialog {
+            asset::Slot::Ref(at) => Some(at),
+            asset::Slot::Inline(_) => None,
         },
-        Effect::Teleport(name) => {
-            let scene = &state.workshop.scene;
-            if let Some(node) = scene.nodes.iter().find(|n| n.name == name) {
-                outcome.teleport = Some(scene.world_transform(node.id).translation);
-                outcome.arrived = Some(name);
-            } else {
-                state.log(
-                    LogLevel::Warn,
-                    format!("No node called \"{name}\" to go to"),
-                );
-            }
-        }
-        Effect::Give(item, count) => {
-            if let Some(inventory) = fighter.as_deref_mut().and_then(|f| f.inventory.as_mut())
-                && inventory.add(&item, count) > 0
-            {
-                let label = fighter
-                    .as_deref()
-                    .and_then(|f| f.inventory.as_ref())
-                    .and_then(|i| i.item(&item))
-                    .map_or(item.clone(), |i| i.name.clone());
-                say(
-                    notices,
-                    &words.got,
-                    &[("item", &label), ("n", &count.to_string())],
-                );
-            }
-        }
-
-        Effect::Set(flag) => entities.set_flag(&flag, true),
-        Effect::Clear(flag) => entities.set_flag(&flag, false),
-        Effect::All(effects) => {
-            for effect in effects {
-                apply_effect(
-                    effect,
-                    entities,
-                    fighter.as_deref_mut(),
-                    state,
-                    outcome,
-                    notices,
-                    words,
-                );
-            }
+        Ok(_) => None,
+        Err(error) => {
+            state.log(LogLevel::Warn, format!("A dialog: {error}"));
+            None
         }
     }
 }
 
 /// The live panel's text: the played character, the clock and the scene's behaviors.
-/// A growing event list as its count and last few entries, so the line stays short.
-fn recent(events: &[String]) -> String {
-    const SHOWN: usize = 3;
-    let last = &events[events.len().saturating_sub(SHOWN)..];
-    let more = if events.len() > SHOWN { "…, " } else { "" };
-    format!("{} [{more}{}]", events.len(), last.join(", "))
-}
-
 fn live_lines(session: &PlaySession, state: &EditorState) -> Vec<String> {
     let mut lines = Vec::new();
     if let Some(line) = session.describe() {
@@ -1834,62 +1070,4 @@ fn live_lines(session: &PlaySession, state: &EditorState) -> Vec<String> {
         }
     }
     lines
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn choosing_an_act_refreshes_play_without_rebuilding_entities() {
-        let mut scene = crate::scene::Scene::default();
-        let id = scene.add(crate::scene::ROOT, "Wall".into(), None, Vec3::ZERO);
-        let node = scene.get_mut(id).unwrap();
-        node.acts = Some(vec![2]);
-        node.behaviors.push(crate::entities::NodeBehavior::new(
-            crate::entities::Behavior::Solid { radius: 1.0 },
-        ));
-        let mut session = PlaySession {
-            entities: Entities::build(&scene, |_| Vec3::ZERO),
-            ..Default::default()
-        };
-        session.set_act(Some(1));
-        assert_eq!(session.entities.hidden().collect::<Vec<_>>(), vec![id]);
-        assert!(!session.entities.blocked(Vec2::ZERO));
-        session.set_act(Some(2));
-        assert_eq!(session.entities.hidden().count(), 0);
-        assert!(session.entities.blocked(Vec2::ZERO));
-        session.entities.consume(id);
-        session.set_act(None);
-        assert_eq!(session.entities.hidden().collect::<Vec<_>>(), vec![id]);
-        assert!(!session.entities.blocked(Vec2::ZERO));
-    }
-
-    #[test]
-    fn a_door_fade_is_darkest_halfway() {
-        let fade = |elapsed| Fade {
-            elapsed,
-            total: 1.0,
-            to: Vec3::ZERO,
-            moved: false,
-        };
-        assert_eq!(fade(0.0).darkness(), 0.0);
-        assert_eq!(fade(0.5).darkness(), 1.0);
-        assert_eq!(fade(1.0).darkness(), 0.0);
-        assert!((fade(0.25).darkness() - 0.5).abs() < 1e-6);
-    }
-
-    #[test]
-    fn vitals_rest_after_a_hit_and_run_out() {
-        let mut v = Vitals::new(Stats {
-            health: 2.0,
-            hurt_time: 1.0,
-        });
-        assert!(!v.hurt(1.0));
-        assert!(!v.hurt(1.0), "just hurt: no second hit");
-        v.safe = 0.0;
-        assert!(v.hurt(1.0));
-        v.heal(5.0);
-        assert_eq!(v.health, 2.0);
-    }
 }

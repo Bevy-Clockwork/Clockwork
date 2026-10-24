@@ -14,6 +14,9 @@
   group.
 - `depth: Bpp8` on `GbaMetatiles` and `GbaMetatileMap` for 256-color backgrounds.
 - `image` on `Surfaces` outputs: the image a surface map covers.
+- `clockwork_runtime::play`: Play's simulation (the played character, its actions and items,
+  the scene's behaviors, rules and goals) runs without a window, so it can be tested headless.
+  The editor's Play mode drives it.
 
 ### Fixed
 
