@@ -115,6 +115,11 @@ impl Navigator {
         self.shown.inverse() * screen
     }
 
+    /// Where a part of the graph is on screen, as last drawn.
+    pub fn screen_rect(&self, graph: Rect) -> Rect {
+        self.shown * graph
+    }
+
     /// Finds matches (`text` gives what a node is searched by) and decides where the view goes;
     /// call before drawing the graph in `viewport`.
     pub fn update<T>(

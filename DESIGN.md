@@ -703,10 +703,26 @@ screen's layout (plugins on the left, the selected one on the right):
   The graph is a view over `recipe.ron` as text (`clockwork_recipe::text`: where every value sits
   in RON): each change replaces a span and is parsed again before it is kept, so the agent's
   comments survive and nothing the format can't hold is written. **Save** writes `recipe.ron` and
-  `graph.ron` (node positions by place and variant), and the plugin is extracted again. Without a layout the
+  `graph.ron` (node positions by a key that survives steps added or removed elsewhere: the
+  variant and the first name a step makes, or an output's id; older files by place still load),
+  and the plugin is extracted again. Without a layout the
   steps are arranged in columns by distance from the ROM (a step that only adds to something
   stays level with it); **Tidy up** does that again. **Provides** shows their characters and
   actions (with *Place in the scene*), abilities (actions, items, roles) and how much they provide.
+- **Groups** (`editor/src/recipe_graph/groups.rs`) fold part of a recipe into one node, which
+  shows only what crosses its edge: an input per value it reads from outside, an output per value
+  made inside and used outside, how many steps it holds, the last image made in it and any of
+  its steps' values chosen with *Shown on its group* (edited there without opening it).
+  Double-click (or **Open**) shows what is in it inside a frame; the first time, it lays its
+  steps out as a grid of the chains in it and moves what is below and to its right out of the
+  way. Ctrl+G groups the selected nodes; groups nest, and are kept in `graph.ron` with their
+  members by key, so they change nothing in `recipe.ron`. A recipe of 40 nodes or more that was
+  never grouped is grouped when it opens: by its section comments (`// == Tiles ==`,
+  `// -- Tiles`, `// ## Tiles`, or without those a comment after a blank line; an output joins
+  the section that makes all it shows), or for 80 nodes or more without sections by the output
+  each step goes into. With nothing selected the Inspector lists the groups and can group again
+  by sections or by outputs, or ungroup all. Recipes of thousands of steps open and stay
+  responsive: wires and lineage are looked up, not searched.
 - Both graphs have **Find** (Ctrl+F; matches are outlined and the view moves to each in turn,
   searching a step's whole text in a recipe) and **Fit** (the whole graph), and zoom out far
   enough for recipes of a hundred steps (`editor/src/graph_view.rs`).
@@ -718,8 +734,11 @@ screen's layout (plugins on the left, the selected one on the right):
   remote control has `Screen(Plugins)`, `PluginEditor("name")` and `Graph(…)` for the graph of the
   plugin shown: `Find`, `Fit`, `Undo`, `Redo`, `Save`, `Revert`, and recipe edits by name
   (`Recipe(Value("step 0", "offset", "0x40"))`, `Wire("step 0", "tiles", "step 4", "metatiles")`,
-  `Add("Crop")`, `Move("step 5", false)`, `Duplicate("output 0")`, `Remove("step 3")`); `Report`
-  adds the graph's state (steps that ran, wires, missing inputs, error, unsaved).
+  `Add("Crop")`, `Move("step 5", false)`, `Duplicate("output 0")`, `Remove("step 3")`), groups
+  (`Group(["step 3", "step 4"], "Tiles")`, `OpenGroup("Tiles")`, `CloseGroup("Tiles")`,
+  `Ungroup("Tiles")`, `GroupAutomatically(false)`, `true` to group by outputs); `Report`
+  adds the graph's state (steps that ran, wires, missing inputs, error, nodes drawn, groups,
+  unsaved).
 
 Not yet: an action timeline (hit windows, spawns and holds dragged on a time line with live
 playback), previews of a role's animation in the role menu, and moving the comment above a step

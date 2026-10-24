@@ -7,7 +7,7 @@
 //! the recipe on the user's ROM, and nodes show what their step made.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     ops::Range,
     path::Path,
     sync::Arc,
@@ -42,6 +42,10 @@ use crate::{
     graph_view::{MAX_SCALE, MIN_SCALE, Navigator},
     kit, theme,
 };
+
+mod groups;
+
+use groups::{GNode, GroupId, GroupInfo, SavedGroup};
 
 /// Where the nodes of a recipe sit, next to its `recipe.ron`.
 pub const LAYOUT_FILE: &str = "graph.ron";
@@ -459,15 +463,27 @@ fn shrink(image: &RgbaImage, side: u32) -> RgbaImage {
     out
 }
 
-/// Where the nodes sit, saved as `graph.ron`: by place in the recipe, with each node's variant
-/// so a recipe changed elsewhere doesn't put its nodes in the wrong places.
+/// Where the nodes sit, saved as `graph.ron`: by a key that stays the same when the recipe
+/// changes elsewhere (see [`groups::stable_keys`]), and the groups they are in.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RecipeLayout {
-    #[serde(default)]
+    /// Places by step and output index, with the variant: how layouts were kept before keys.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub steps: Vec<(String, (f32, f32))>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub outputs: Vec<(String, (f32, f32))>,
+    /// Places by node key.
+    #[serde(default)]
+    pub nodes: BTreeMap<String, (f32, f32)>,
+    #[serde(default)]
+    pub groups: Vec<SavedGroup>,
+    /// Values of nodes shown on the closed group they are in, by node key.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub exposed: BTreeMap<String, Vec<String>>,
+    /// Groups were made (or all removed) for this recipe, so it isn't grouped by itself again.
+    #[serde(default)]
+    pub grouped: bool,
 }
 
 pub fn load_layout(dir: &Path) -> RecipeLayout {
@@ -678,8 +694,29 @@ enum Change {
     Duplicate(RNode),
 }
 
-/// Where nodes are drawn and whether they are open, by node.
-type Places = HashMap<RNode, (Pos2, bool)>;
+/// Where a node is drawn, whether it is open, the group it is in and which of its values its
+/// closed group shows.
+#[derive(Clone, Debug, PartialEq)]
+struct Place {
+    pos: Pos2,
+    open: bool,
+    group: Option<GroupId>,
+    exposed: Vec<String>,
+}
+
+impl Place {
+    fn at(pos: Pos2) -> Self {
+        Self {
+            pos,
+            open: true,
+            group: None,
+            exposed: Vec::new(),
+        }
+    }
+}
+
+/// Every node's [`Place`], by node.
+type Places = HashMap<RNode, Place>;
 
 /// Places with nodes renumbered; `None` drops a node.
 fn remap(places: Places, f: impl Fn(RNode) -> Option<RNode>) -> Places {
@@ -718,7 +755,14 @@ pub struct RecipeGraph {
     saved_text: String,
     ports: HashMap<RNode, Vec<OwnedPort>>,
     resolution: Resolution,
-    snarl: Snarl<RNode>,
+    snarl: Snarl<GNode>,
+    /// Every node's place, drawn or inside a closed group.
+    nodes: Places,
+    groups: BTreeMap<GroupId, GroupInfo>,
+    /// The pins of the closed groups drawn.
+    pins: HashMap<GroupId, groups::Pins>,
+    /// Groups were made (or all removed), so the recipe isn't grouped by itself again.
+    grouped: bool,
     rom: Option<Arc<Vec<u8>>>,
     trace: Trace,
     trace_dirty: bool,
@@ -745,6 +789,9 @@ pub struct RecipeGraph {
     pub plugin: String,
     /// The node the Inspector shows: the one last selected, added or moved.
     focus: Option<RNode>,
+    /// The group the Inspector shows, when a closed group was selected last.
+    focus_group: Option<GroupId>,
+    /// What is typed as a group's new name, while it is renamed.
     /// The nodes selected as last drawn, to tell when the selection changes.
     selection: Vec<NodeId>,
     /// What is typed in the add menus.
@@ -770,19 +817,59 @@ impl RecipeGraph {
         rom: Option<Arc<Vec<u8>>>,
     ) -> Result<Self, String> {
         let (doc, recipe) = parse(&text)?;
+        let ports = all_ports(&recipe);
+        let keys = groups::stable_keys(&recipe, &ports);
         let mut places = Places::new();
+        for (node, key) in &keys {
+            if let Some(p) = layout.nodes.get(key) {
+                places.insert(*node, Place::at(pos2(p.0, p.1)));
+            }
+        }
+        // A layout kept before nodes had keys: by place, as long as the variant is the same.
         for (i, step) in recipe.steps.iter().enumerate() {
             if let Some((name, p)) = layout.steps.get(i)
                 && name == step.name()
             {
-                places.insert(RNode::Step(i), (pos2(p.0, p.1), true));
+                places
+                    .entry(RNode::Step(i))
+                    .or_insert(Place::at(pos2(p.0, p.1)));
             }
         }
         for (i, output) in recipe.outputs.iter().enumerate() {
             if let Some((name, p)) = layout.outputs.get(i)
                 && name == output.name()
             {
-                places.insert(RNode::Output(i), (pos2(p.0, p.1), true));
+                places
+                    .entry(RNode::Output(i))
+                    .or_insert(Place::at(pos2(p.0, p.1)));
+            }
+        }
+        let by_key: HashMap<&str, RNode> = keys.iter().map(|(n, k)| (k.as_str(), *n)).collect();
+        let mut saved_groups = BTreeMap::new();
+        for group in &layout.groups {
+            saved_groups.insert(
+                group.id,
+                GroupInfo {
+                    name: group.name.clone(),
+                    parent: group.parent,
+                    open: group.open,
+                    pos: pos2(group.at.0, group.at.1),
+                    laid_out: group.laid_out,
+                },
+            );
+            for key in &group.members {
+                if let Some(node) = by_key.get(key.as_str())
+                    && let Some(place) = places.get_mut(node)
+                {
+                    place.group = Some(group.id);
+                }
+            }
+        }
+        for (key, fields) in &layout.exposed {
+            if let Some(node) = by_key.get(key.as_str())
+                && let Some(place) = places.get_mut(node)
+            {
+                place.exposed = fields.clone();
             }
         }
         let complete = places.len() == recipe.steps.len() + recipe.outputs.len();
@@ -793,6 +880,10 @@ impl RecipeGraph {
             ports: HashMap::new(),
             resolution: Resolution::default(),
             snarl: Snarl::new(),
+            nodes: Places::new(),
+            groups: saved_groups,
+            pins: HashMap::new(),
+            grouped: layout.grouped || !layout.groups.is_empty(),
             rom,
             assets: Default::default(),
             plugin: String::new(),
@@ -811,6 +902,7 @@ impl RecipeGraph {
             arrange_pending: !complete,
             nav: Navigator::default(),
             focus: None,
+            focus_group: None,
             selection: Vec::new(),
             add_query: String::new(),
             add_at: None,
@@ -818,6 +910,11 @@ impl RecipeGraph {
         };
         graph.nav.open_view();
         graph.refresh(places);
+        let count = graph.recipe.steps.len() + graph.recipe.outputs.len();
+        if !graph.grouped && count >= groups::AUTO_GROUP {
+            graph.group_automatically(count >= groups::AUTO_GROUP_BY_OUTPUTS);
+            graph.arrange_pending = true;
+        }
         graph.run_trace();
         Ok(graph)
     }
@@ -856,7 +953,8 @@ impl RecipeGraph {
     pub fn undo(&mut self) {
         if let Some(text) = self.undo.pop() {
             let current = self.doc.text.clone();
-            if self.set_text(&text, self.places()).is_ok() {
+            let places = self.places_for(&text);
+            if self.set_text(&text, places).is_ok() {
                 self.redo.push(current);
             }
         }
@@ -866,11 +964,31 @@ impl RecipeGraph {
     pub fn redo(&mut self) {
         if let Some(text) = self.redo.pop() {
             let current = self.doc.text.clone();
-            if self.set_text(&text, self.places()).is_ok() {
+            let places = self.places_for(&text);
+            if self.set_text(&text, places).is_ok() {
                 self.undo.push(current);
             }
         }
         self.last_field = None;
+    }
+
+    /// The places of the nodes for another text of the recipe, by stable key, so a node keeps
+    /// its place and group when others before it come or go.
+    fn places_for(&self, text: &str) -> Places {
+        let mut by_key: HashMap<String, Place> = HashMap::new();
+        let mut places = self.places();
+        for (node, key) in groups::stable_keys(&self.recipe, &self.ports) {
+            if let Some(place) = places.remove(&node) {
+                by_key.insert(key, place);
+            }
+        }
+        let Ok((_, recipe)) = parse(text) else {
+            return self.places();
+        };
+        groups::stable_keys(&recipe, &all_ports(&recipe))
+            .into_iter()
+            .filter_map(|(node, key)| Some((node, by_key.remove(&key)?)))
+            .collect()
     }
 
     /// How many steps and outputs the recipe has, and the error of its last run, if any.
@@ -885,34 +1003,64 @@ impl RecipeGraph {
     /// Where the nodes sit, to save next to the recipe.
     pub fn layout(&self) -> RecipeLayout {
         let places = self.places();
-        let at = |node: RNode| {
-            places
-                .get(&node)
-                .map_or((0.0, 0.0), |(p, _)| (p.x.round(), p.y.round()))
+        let keys = groups::stable_keys(&self.recipe, &self.ports);
+        let mut layout = RecipeLayout {
+            grouped: self.grouped,
+            ..RecipeLayout::default()
         };
-        RecipeLayout {
-            steps: self
-                .recipe
-                .steps
-                .iter()
-                .enumerate()
-                .map(|(i, s)| (s.name().to_string(), at(RNode::Step(i))))
-                .collect(),
-            outputs: self
-                .recipe
-                .outputs
-                .iter()
-                .enumerate()
-                .map(|(i, o)| (o.name().to_string(), at(RNode::Output(i))))
-                .collect(),
+        let mut members: BTreeMap<GroupId, Vec<String>> = BTreeMap::new();
+        for (node, key) in keys {
+            let Some(place) = places.get(&node) else {
+                continue;
+            };
+            layout
+                .nodes
+                .insert(key.clone(), (place.pos.x.round(), place.pos.y.round()));
+            if !place.exposed.is_empty() {
+                layout.exposed.insert(key.clone(), place.exposed.clone());
+            }
+            if let Some(g) = place.group {
+                members.entry(g).or_default().push(key);
+            }
         }
+        let shown = self.group_places();
+        for (id, info) in &self.groups {
+            let pos = shown.get(id).copied().unwrap_or(info.pos);
+            layout.groups.push(SavedGroup {
+                id: *id,
+                name: info.name.clone(),
+                parent: info.parent,
+                open: info.open,
+                at: (pos.x.round(), pos.y.round()),
+                laid_out: info.laid_out,
+                members: members.remove(id).unwrap_or_default(),
+            });
+        }
+        layout
     }
 
-    /// Where every node is drawn, and whether it is open.
+    /// Where every node is drawn, whether it is open, and the group it is in.
     fn places(&self) -> Places {
+        let mut places = self.nodes.clone();
+        for info in self.snarl.nodes_info() {
+            if let GNode::Item(node) = info.value
+                && let Some(place) = places.get_mut(&node)
+            {
+                place.pos = info.pos;
+                place.open = info.open;
+            }
+        }
+        places
+    }
+
+    /// Where the closed groups are drawn.
+    fn group_places(&self) -> HashMap<GroupId, Pos2> {
         self.snarl
             .nodes_info()
-            .map(|n| (n.value, (n.pos, n.open)))
+            .filter_map(|info| match info.value {
+                GNode::Group(g) => Some((g, info.pos)),
+                GNode::Item(_) => None,
+            })
             .collect()
     }
 
@@ -933,16 +1081,17 @@ impl RecipeGraph {
     }
 
     fn refresh(&mut self, places: Places) {
-        self.ports = (0..self.recipe.steps.len())
-            .map(RNode::Step)
-            .chain((0..self.recipe.outputs.len()).map(RNode::Output))
-            .map(|node| (node, ports_of(&self.recipe, node)))
-            .collect();
+        // Closed groups keep where they were drawn.
+        for (g, pos) in self.group_places() {
+            if let Some(info) = self.groups.get_mut(&g) {
+                info.pos = pos;
+            }
+        }
+        self.ports = all_ports(&self.recipe);
         self.resolution = resolve(&self.recipe, &self.ports);
         let depth = depths(&self.recipe, &self.resolution, &self.ports);
-        let mut snarl = Snarl::new();
-        let mut ids: HashMap<RNode, NodeId> = HashMap::new();
         let last = depth.values().copied().max().unwrap_or(0) + 1;
+        let mut nodes = Places::new();
         for (row, node) in (0..self.recipe.steps.len())
             .map(RNode::Step)
             .chain((0..self.recipe.outputs.len()).map(RNode::Output))
@@ -952,29 +1101,68 @@ impl RecipeGraph {
                 RNode::Step(_) => depth.get(&node).copied().unwrap_or(0),
                 RNode::Output(_) => last,
             };
-            let (pos, open) = places
+            let place = places
                 .get(&node)
-                .copied()
-                .unwrap_or((pos2(column as f32 * COLUMN, row as f32 * ROW * 0.5), true));
-            let id = snarl.insert_node(pos, node);
+                .cloned()
+                .unwrap_or_else(|| Place::at(pos2(column as f32 * COLUMN, row as f32 * ROW * 0.5)));
+            nodes.insert(node, place);
+        }
+        self.nodes = nodes;
+        self.prune_groups();
+
+        let mut snarl = Snarl::new();
+        let mut ids: HashMap<GNode, NodeId> = HashMap::new();
+        for node in (0..self.recipe.steps.len())
+            .map(RNode::Step)
+            .chain((0..self.recipe.outputs.len()).map(RNode::Output))
+        {
+            let shown = groups::shown_as(&self.groups, &self.nodes, node);
+            if ids.contains_key(&shown) {
+                continue;
+            }
+            let (pos, open) = match shown {
+                GNode::Item(_) => (self.nodes[&node].pos, self.nodes[&node].open),
+                GNode::Group(g) => (self.groups[&g].pos, true),
+            };
+            let id = snarl.insert_node(pos, shown);
             if !open {
                 snarl.open_node(id, false);
             }
-            ids.insert(node, id);
+            ids.insert(shown, id);
         }
+        self.pins = groups::pins(&self.groups, &self.nodes, &self.resolution);
         for ((from, from_port), (to, to_port)) in &self.resolution.wires {
-            let output = outputs_of(&self.ports[from])
-                .iter()
-                .position(|p| p == from_port);
-            let input = inputs_of(&self.ports[to]).iter().position(|p| p == to_port);
+            let (a, b) = (
+                groups::shown_as(&self.groups, &self.nodes, *from),
+                groups::shown_as(&self.groups, &self.nodes, *to),
+            );
+            if a == b {
+                continue;
+            }
+            let output = match a {
+                GNode::Item(_) => outputs_of(&self.ports[from])
+                    .iter()
+                    .position(|p| p == from_port),
+                GNode::Group(g) => self.pins[&g]
+                    .outputs
+                    .iter()
+                    .position(|o| *o == (*from, *from_port)),
+            };
+            let input = match b {
+                GNode::Item(_) => inputs_of(&self.ports[to]).iter().position(|p| p == to_port),
+                GNode::Group(g) => self.pins[&g]
+                    .inputs
+                    .iter()
+                    .position(|i| i.from == Some((*from, *from_port))),
+            };
             if let (Some(output), Some(input)) = (output, input) {
                 snarl.connect(
                     OutPinId {
-                        node: ids[from],
+                        node: ids[&a],
                         output,
                     },
                     InPinId {
-                        node: ids[to],
+                        node: ids[&b],
                         input,
                     },
                 );
@@ -982,6 +1170,47 @@ impl RecipeGraph {
         }
         self.snarl = snarl;
         self.sizes.clear();
+        if self
+            .focus_group
+            .is_some_and(|g| !self.groups.contains_key(&g))
+        {
+            self.focus_group = None;
+        }
+    }
+
+    /// Drops groups with nothing in them, and parents that are gone.
+    fn prune_groups(&mut self) {
+        loop {
+            let used: HashSet<GroupId> = self
+                .nodes
+                .values()
+                .filter_map(|p| p.group)
+                .chain(self.groups.values().filter_map(|g| g.parent))
+                .collect();
+            let empty: Vec<GroupId> = self
+                .groups
+                .keys()
+                .copied()
+                .filter(|g| !used.contains(g))
+                .collect();
+            if empty.is_empty() {
+                break;
+            }
+            for g in empty {
+                self.groups.remove(&g);
+            }
+        }
+        let known: HashSet<GroupId> = self.groups.keys().copied().collect();
+        for info in self.groups.values_mut() {
+            if info.parent.is_some_and(|p| !known.contains(&p)) {
+                info.parent = None;
+            }
+        }
+        for place in self.nodes.values_mut() {
+            if place.group.is_some_and(|g| !known.contains(&g)) {
+                place.group = None;
+            }
+        }
     }
 
     /// Runs the recipe on the ROM and keeps what every step made. Used where the result is
@@ -1168,7 +1397,20 @@ impl RecipeGraph {
                     RNode::Output(place)
                 };
                 places = remap(places, |n| Some(shifted(n, node)));
-                places.insert(node, (at, true));
+                // It joins the group of the node before it (after it, when first), if that is
+                // open: a new node never disappears into a closed group.
+                let neighbour = same_list(node, if place > 0 { place - 1 } else { place + 1 });
+                let group = places
+                    .get(&neighbour)
+                    .and_then(|p| p.group)
+                    .filter(|g| groups::shown_group(&self.groups, Some(*g)).is_none());
+                places.insert(
+                    node,
+                    Place {
+                        group,
+                        ..Place::at(at)
+                    },
+                );
                 let (mut doc, mut recipe) = parse(&text)?;
                 if let Some((kind, name)) = read {
                     let ports = ports_of(&recipe, node);
@@ -1265,10 +1507,17 @@ impl RecipeGraph {
                     doc = Doc::parse(doc.replaced(id.span.clone(), &string_literal(&name)))
                         .map_err(|e| e.to_string())?;
                 }
-                let original = places.get(&node).copied();
+                let original = places.get(&node).cloned();
                 places = remap(places, |n| Some(shifted(n, copy)));
-                if let Some((p, open)) = original {
-                    places.insert(copy, (p + vec2(40.0, 40.0), open));
+                if let Some(original) = original {
+                    places.insert(
+                        copy,
+                        Place {
+                            pos: original.pos + vec2(40.0, 40.0),
+                            exposed: Vec::new(),
+                            ..original
+                        },
+                    );
                 }
                 focus = Some(copy);
                 doc.text
@@ -1471,13 +1720,16 @@ impl RecipeGraph {
     pub fn describe(&self) -> String {
         let made = self.trace.steps.iter().filter(|s| s.is_some()).count();
         format!(
-            "recipe, {} steps ({} ran), {} outputs, {} wires, {} inputs missing, error {:?}",
+            "recipe, {} steps ({} ran), {} outputs, {} wires, {} inputs missing, error {:?}, \
+             {} drawn, groups {:?}",
             self.recipe.steps.len(),
             made,
             self.recipe.outputs.len(),
             self.resolution.wires.len(),
             self.resolution.missing.len(),
-            self.trace.error
+            self.trace.error,
+            self.snarl.node_ids().count(),
+            self.group_list()
         )
     }
 
@@ -1528,7 +1780,23 @@ impl RecipeGraph {
     /// Shows a node in the Inspector and moves the view to it.
     pub fn go_to(&mut self, node: RNode) {
         self.focus = Some(node);
-        if let Some((id, pos, _)) = self.snarl.nodes_pos_ids().find(|(_, _, n)| **n == node) {
+        self.focus_group = None;
+        // Closed groups it is in open first.
+        let group = self.nodes.get(&node).and_then(|p| p.group);
+        if groups::shown_group(&self.groups, group).is_some() {
+            let mut places = self.places();
+            let closed: Vec<GroupId> = groups::ancestors(&self.groups, group)
+                .into_iter()
+                .filter(|g| self.groups.get(g).is_some_and(|i| !i.open))
+                .collect();
+            self.open_groups(&closed, true, &mut places);
+            self.refresh(places);
+        }
+        if let Some((id, pos, _)) = self
+            .snarl
+            .nodes_pos_ids()
+            .find(|(_, _, n)| **n == GNode::Item(node))
+        {
             let size = self.sizes.get(&id).copied().unwrap_or(vec2(260.0, 120.0));
             self.nav.show(Rect::from_min_size(pos, size));
         }
@@ -1570,14 +1838,28 @@ impl RecipeGraph {
                     .show(ui, |ui| self.inspector(ui, &mut changes));
             });
 
-        let doc = &self.doc;
+        let (doc, groups_info, nodes) = (&self.doc, &self.groups, &self.nodes);
         self.nav.update(
             &self.snarl,
             &self.sizes,
             ui.available_rect_before_wrap(),
-            |_, node| {
-                let text = Self::node_doc(doc, *node).map_or("", |n| doc.text_of(n));
-                format!("{} {text}", title(doc, *node))
+            |_, node| match node {
+                GNode::Item(node) => {
+                    let text = Self::node_doc(doc, *node).map_or("", |n| doc.text_of(n));
+                    format!("{} {text}", title(doc, *node))
+                }
+                // A closed group is found by its name and by what is inside it.
+                GNode::Group(g) => {
+                    let mut text = groups_info.get(g).map_or(String::new(), |i| i.name.clone());
+                    for n in groups::members(groups_info, nodes, *g) {
+                        let inner = Self::node_doc(doc, n).map_or("", |item| doc.text_of(item));
+                        text.push(' ');
+                        text.push_str(&title(doc, n));
+                        text.push(' ');
+                        text.push_str(inner);
+                    }
+                    text
+                }
             },
         );
         let lineage = self.focus.map(|node| lineage(&self.resolution, node));
@@ -1592,10 +1874,17 @@ impl RecipeGraph {
             thumbs: &mut self.thumbs,
             revision: self.revision,
             focus: self.focus,
+            focus_group: self.focus_group,
             lineage: lineage.as_ref(),
             add_query: &mut self.add_query,
             insert,
+            groups: &self.groups,
+            pins: &self.pins,
+            nodes: &self.nodes,
+            edits: &mut self.edits,
+            last_sizes: &self.sizes,
             changes: Vec::new(),
+            group_changes: Vec::new(),
             sizes: HashMap::new(),
         };
         let widget = egui_snarl::ui::SnarlWidget::new()
@@ -1603,32 +1892,93 @@ impl RecipeGraph {
             .style(style())
             .min_size(ui.available_size());
         let response = widget.show(&mut self.snarl, &mut viewer, ui);
+        let frames = viewer.frames(&self.snarl);
         changes.extend(std::mem::take(&mut viewer.changes));
+        let mut group_changes = std::mem::take(&mut viewer.group_changes);
         let sizes = std::mem::take(&mut viewer.sizes);
+
+        // Open groups have their name and a button to close them above their frame.
+        for (g, _, rect) in frames {
+            let screen = self.nav.screen_rect(rect);
+            if !response.rect.contains(screen.left_top() + vec2(4.0, 4.0)) {
+                continue;
+            }
+            let name = self
+                .groups
+                .get(&g)
+                .map_or(String::new(), |i| i.name.clone());
+            egui::Area::new(egui::Id::new(("group header", id_salt, g)))
+                .order(egui::Order::Foreground)
+                .fixed_pos(screen.right_top() + vec2(-34.0, 6.0))
+                .show(ui.ctx(), |ui| {
+                    if kit::icon_button(ui, "▾", &format!("Close {name}")).clicked() {
+                        group_changes.push(GroupChange::Open(g, false));
+                    }
+                });
+        }
+
+        // A closed group opens with a double-click.
+        let double = ui.input(|i| {
+            i.pointer
+                .button_double_clicked(egui::PointerButton::Primary)
+        });
+        if double
+            && let Some(at) = ui.input(|i| i.pointer.latest_pos())
+            && response.rect.contains(at)
+        {
+            let at = self.nav.graph_pos(at);
+            let hit = self.snarl.nodes_pos_ids().find_map(|(id, pos, node)| {
+                let size = sizes.get(&id).copied().unwrap_or(vec2(240.0, 100.0));
+                match node {
+                    GNode::Group(g) if Rect::from_min_size(pos, size).contains(at) => Some(*g),
+                    _ => None,
+                }
+            });
+            if let Some(g) = hit {
+                group_changes.push(GroupChange::Open(g, true));
+            }
+        }
 
         // The Inspector follows the selection when it changes.
         let selected = widget.get_selected_nodes(ui);
         if selected != self.selection {
-            self.focus = selected
+            let last = selected
                 .last()
                 .and_then(|id| self.snarl.get_node(*id))
                 .copied();
+            (self.focus, self.focus_group) = match last {
+                Some(GNode::Item(node)) => (Some(node), None),
+                Some(GNode::Group(g)) => (None, Some(g)),
+                None => (None, None),
+            };
             self.selection = selected;
             ui.ctx().request_repaint();
         }
 
         let typing = ui.ctx().egui_wants_keyboard_input();
         if !typing {
+            let selected: Vec<GNode> = self
+                .selection
+                .iter()
+                .filter_map(|id| self.snarl.get_node(*id).copied())
+                .collect();
             let delete = ui.input(|i| i.key_pressed(egui::Key::Delete));
             if delete {
-                let selected: Vec<RNode> = self
-                    .selection
+                let removed: Vec<RNode> = selected
                     .iter()
-                    .filter_map(|id| self.snarl.get_node(*id).copied())
+                    .flat_map(|node| match node {
+                        GNode::Item(n) => vec![*n],
+                        GNode::Group(g) => groups::members(&self.groups, &self.nodes, *g),
+                    })
                     .collect();
-                if !selected.is_empty() {
-                    changes.insert(0, Change::Remove(selected));
+                if !removed.is_empty() {
+                    changes.insert(0, Change::Remove(removed));
                 }
+            }
+            if !selected.is_empty()
+                && ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::G))
+            {
+                self.group(&selected, None);
             }
             let hovered = ui.rect_contains_pointer(response.rect);
             if hovered
@@ -1686,6 +2036,14 @@ impl RecipeGraph {
             }
         }
 
+        for change in group_changes {
+            match change {
+                GroupChange::Open(g, open) => self.set_group_open(g, open),
+                GroupChange::Ungroup(g) => self.ungroup(g),
+                GroupChange::Rename(g, name) => self.rename_group(g, &name),
+            }
+        }
+
         // Spans belong to the text as drawn: make the first change only.
         if let Some(change) = changes.into_iter().next() {
             match self.apply(change) {
@@ -1725,9 +2083,18 @@ impl RecipeGraph {
     /// and what is wrong.
     fn inspector(&mut self, ui: &mut Ui, changes: &mut Vec<Change>) {
         let Some(node) = self.focus else {
-            self.overview(ui);
+            match self.focus_group.filter(|g| self.groups.contains_key(g)) {
+                Some(group) => self.group_inspector(ui, group),
+                None => self.overview(ui),
+            }
             return;
         };
+        let in_group = self
+            .nodes
+            .get(&node)
+            .and_then(|p| p.group)
+            .and_then(|g| Some((g, self.groups.get(&g)?.name.clone())));
+        let mut toggled: Option<String> = None;
         let Self {
             doc,
             recipe,
@@ -1737,6 +2104,7 @@ impl RecipeGraph {
             edits,
             thumbs,
             revision,
+            nodes,
             ..
         } = self;
         let Some(item) = Self::node_doc(doc, node) else {
@@ -1750,6 +2118,15 @@ impl RecipeGraph {
         );
         if let Some(info) = info {
             ui.label(kit::dim(info.about));
+        }
+        let mut to_group = None;
+        if let Some((group, name)) = &in_group {
+            ui.horizontal(|ui| {
+                ui.label(kit::dim("In the group"));
+                if ui.link(name).clicked() {
+                    to_group = Some(*group);
+                }
+            });
         }
         ui.add_space(6.0);
 
@@ -1947,6 +2324,35 @@ impl RecipeGraph {
             }
         }
 
+        // Values the closed group shows, so the group can be changed without opening it.
+        if in_group.is_some()
+            && let Kind::Struct { fields, .. } = &item.kind
+        {
+            kit::section(ui, "Shown on its group");
+            let exposed = nodes.get(&node).map_or(&[][..], |p| p.exposed.as_slice());
+            for field in fields.iter().filter(|f| !names.contains(&f.key.as_str())) {
+                let mut on = exposed.contains(&field.key);
+                if ui.checkbox(&mut on, field.key.as_str()).changed() {
+                    toggled = Some(field.key.clone());
+                }
+            }
+        }
+        if let Some(field) = toggled
+            && let Some(place) = nodes.get_mut(&node)
+        {
+            match place.exposed.iter().position(|f| *f == field) {
+                Some(i) => {
+                    place.exposed.remove(i);
+                }
+                None => place.exposed.push(field),
+            }
+        }
+        if let Some(group) = to_group {
+            self.focus = None;
+            self.focus_group = Some(group);
+            return;
+        }
+
         kit::section(ui, "Result");
         let failed = match node {
             RNode::Step(i) => trace.error_step == Some(i),
@@ -1992,6 +2398,119 @@ impl RecipeGraph {
         }
     }
 
+    /// A group in focus: its name, what is in it and what it reads and makes.
+    fn group_inspector(&mut self, ui: &mut Ui, group: GroupId) {
+        let members = groups::members(&self.groups, &self.nodes, group);
+        let Some(info) = self.groups.get_mut(&group) else {
+            return;
+        };
+        ui.label(kit::dim("Group"));
+        ui.add(
+            egui::TextEdit::singleline(&mut info.name)
+                .font(theme::display(18.0))
+                .desired_width(f32::INFINITY),
+        );
+        let open = info.open;
+        let parent = info.parent;
+        ui.label(kit::dim(format!(
+            "{} node(s). Closed, it is drawn as one node with what it reads and makes; \
+             open, as a frame around them.",
+            members.len()
+        )));
+        ui.add_space(6.0);
+        let mut set_open = None;
+        let mut ungroup = false;
+        let mut remove = false;
+        ui.horizontal(|ui| {
+            let label = if open { "Close" } else { "Open" };
+            if ui
+                .button(label)
+                .on_hover_text(kit::tip(
+                    "Show what is in it, or fold it back",
+                    "Double-click",
+                ))
+                .clicked()
+            {
+                set_open = Some(!open);
+            }
+            if ui
+                .button("Ungroup")
+                .on_hover_text("Take the group away and keep what is in it")
+                .clicked()
+            {
+                ungroup = true;
+            }
+            if ui
+                .button("Remove its steps")
+                .on_hover_text(kit::tip(
+                    "Remove everything in it from the recipe",
+                    "Delete",
+                ))
+                .clicked()
+            {
+                remove = true;
+            }
+        });
+        let mut go = None;
+        let mut to_group = None;
+        if let Some(parent) = parent
+            && let Some(name) = self.groups.get(&parent).map(|i| i.name.clone())
+        {
+            ui.horizontal(|ui| {
+                ui.label(kit::dim("In the group"));
+                if ui.link(name).clicked() {
+                    to_group = Some(parent);
+                }
+            });
+        }
+        if let Some(pins) = self.pins.get(&group) {
+            kit::section(ui, &format!("Reads · {}", pins.inputs.len()));
+            for input in &pins.inputs {
+                let (node, i) = input.targets[0];
+                let name = &self.ports[&node][i].name;
+                let text = if input.from.is_none() {
+                    RichText::new(format!("{name} (missing)")).color(theme::ERROR)
+                } else {
+                    RichText::new(name)
+                };
+                if ui.link(text).clicked() {
+                    go = Some(input.from.map_or(node, |(from, _)| from));
+                }
+            }
+            kit::section(ui, &format!("Makes · {}", pins.outputs.len()));
+            for (node, i) in &pins.outputs {
+                if ui.link(&self.ports[node][*i].name).clicked() {
+                    go = Some(*node);
+                }
+            }
+        }
+        kit::section(ui, "In it");
+        for node in members.iter().take(200) {
+            if ui.link(title(&self.doc, *node)).clicked() {
+                go = Some(*node);
+            }
+        }
+        if members.len() > 200 {
+            ui.label(kit::dim(format!("and {} more", members.len() - 200)));
+        }
+        if let Some(open) = set_open {
+            self.set_group_open(group, open);
+        }
+        if ungroup {
+            self.ungroup(group);
+            self.focus_group = None;
+        }
+        if remove && let Err(e) = self.apply(Change::Remove(members)) {
+            self.message = Some(e);
+        }
+        if let Some(parent) = to_group {
+            self.focus_group = Some(parent);
+        }
+        if let Some(node) = go {
+            self.go_to(node);
+        }
+    }
+
     /// The Inspector with nothing selected: how to edit, then what is wrong.
     fn overview(&mut self, ui: &mut Ui) {
         ui.label(
@@ -2013,6 +2532,8 @@ impl RecipeGraph {
             ("Ctrl+D", "duplicate"),
             ("Delete", "remove the selected nodes"),
             ("F", "frame the selected node"),
+            ("Ctrl+G", "group the selected nodes"),
+            ("Double-click a group", "open or close it"),
             ("Ctrl+F", "find a node"),
             ("Ctrl+Z", "undo"),
             ("Ctrl+Y", "redo"),
@@ -2022,6 +2543,59 @@ impl RecipeGraph {
                 ui.label(kit::dim(what));
             });
         }
+        kit::section(ui, &format!("Groups · {}", self.groups.len()));
+        let mut regroup = None;
+        let mut ungroup_all = false;
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .button("By sections")
+                .on_hover_text("A group for each section comment of the recipe")
+                .clicked()
+            {
+                regroup = Some(false);
+            }
+            if ui
+                .button("By outputs")
+                .on_hover_text(
+                    "A group for the steps that make each output (when it has no sections)",
+                )
+                .clicked()
+            {
+                regroup = Some(true);
+            }
+            if !self.groups.is_empty()
+                && ui
+                    .button("Ungroup all")
+                    .on_hover_text("Take every group away")
+                    .clicked()
+            {
+                ungroup_all = true;
+            }
+        });
+        let mut pick = None;
+        for (g, info) in self.groups.iter().filter(|(_, i)| i.parent.is_none()) {
+            let count = groups::members(&self.groups, &self.nodes, *g).len();
+            ui.horizontal(|ui| {
+                if ui.link(&info.name).clicked() {
+                    pick = Some(*g);
+                }
+                ui.label(kit::dim(format!("{count}")));
+            });
+        }
+        if let Some(by_outputs) = regroup {
+            self.ungroup_all();
+            if self.group_automatically(by_outputs) == 0 {
+                self.message = Some("The recipe has no section comments to group by".into());
+            }
+        }
+        if ungroup_all {
+            self.ungroup_all();
+        }
+        if let Some(g) = pick {
+            self.focus_group = Some(g);
+            self.frame_group(g);
+        }
+
         let problems = self.problems();
         kit::section(ui, &format!("Problems · {}", problems.len()));
         if problems.is_empty() {
@@ -2051,9 +2625,26 @@ impl RecipeGraph {
     pub fn arrange(&mut self) {
         let depth = depths(&self.recipe, &self.resolution, &self.ports);
         let last = depth.values().copied().max().unwrap_or(0) + 1;
-        let column = |node: RNode| match node {
+        let item_column = |node: RNode| match node {
             RNode::Step(_) => depth.get(&node).copied().unwrap_or(0),
             RNode::Output(_) => last,
+        };
+        // A closed group goes in the column of the earliest node in it.
+        let column = |node: GNode| match node {
+            GNode::Item(n) => item_column(n),
+            GNode::Group(g) => groups::members(&self.groups, &self.nodes, g)
+                .into_iter()
+                .map(item_column)
+                .min()
+                .unwrap_or(0),
+        };
+        let first = |node: GNode| match node {
+            GNode::Item(n) => order(n),
+            GNode::Group(g) => groups::members(&self.groups, &self.nodes, g)
+                .into_iter()
+                .map(order)
+                .min()
+                .unwrap_or((0, 0)),
         };
         let size = |id: NodeId| self.sizes.get(&id).copied().unwrap_or(vec2(260.0, 120.0));
         let mut width = vec![0.0f32; last + 1];
@@ -2064,15 +2655,12 @@ impl RecipeGraph {
         for c in 1..=last {
             x[c] = x[c - 1] + width[c - 1] + GAP * 2.0;
         }
-        let mut order: Vec<(RNode, NodeId)> =
+        let mut sorted: Vec<(GNode, NodeId)> =
             self.snarl.node_ids().map(|(id, n)| (*n, id)).collect();
-        order.sort_by_key(|(n, _)| match n {
-            RNode::Step(i) => (0, *i),
-            RNode::Output(i) => (1, *i),
-        });
+        sorted.sort_by_key(|(n, _)| first(*n));
         let mut bottom = vec![0.0f32; last + 1];
         let mut placed = Vec::new();
-        for (node, id) in order {
+        for (node, id) in sorted {
             let c = column(node);
             placed.push((id, pos2(x[c], bottom[c])));
             bottom[c] += size(id).y + GAP;
@@ -2082,6 +2670,433 @@ impl RecipeGraph {
                 info.pos = pos;
             }
         }
+    }
+
+    /// Opens or closes a group (see [`RecipeGraph::open_groups`]).
+    pub fn set_group_open(&mut self, group: GroupId, open: bool) {
+        let mut places = self.places();
+        self.open_groups(&[group], open, &mut places);
+        self.refresh(places);
+        if open {
+            self.focus_group = None;
+            self.frame_group(group);
+        } else {
+            self.focus = None;
+            self.focus_group = Some(group);
+        }
+    }
+
+    /// Opens or closes groups in `places`. A group opened for the first time puts what is
+    /// in it where it was drawn (see [`groups::local_layout`]); opening one group also moves
+    /// what is below it and to its right out of the way.
+    fn open_groups(&mut self, open_these: &[GroupId], open: bool, places: &mut Places) {
+        let shown = self.group_places();
+        let depth = depths(&self.recipe, &self.resolution, &self.ports);
+        let drawn: HashMap<GNode, Vec2> = self
+            .snarl
+            .node_ids()
+            .filter_map(|(id, n)| Some((*n, *self.sizes.get(&id)?)))
+            .collect();
+        for g in open_these {
+            if let Some(pos) = shown.get(g)
+                && let Some(info) = self.groups.get_mut(g)
+            {
+                info.pos = *pos;
+            }
+            let Some(info) = self.groups.get_mut(g) else {
+                continue;
+            };
+            info.open = open;
+            if !open || info.laid_out {
+                continue;
+            }
+            info.laid_out = true;
+            let at = info.pos;
+            // What is directly in it: its nodes and the groups in it, each as one part.
+            let mut parts: Vec<(GNode, usize, (u8, usize))> = places
+                .iter()
+                .filter(|(_, p)| p.group == Some(*g))
+                .map(|(n, _)| (GNode::Item(*n), part_column(*n, &depth), order(*n)))
+                .collect();
+            for (child, child_info) in &self.groups {
+                if child_info.parent == Some(*g) {
+                    let members = groups::members(&self.groups, places, *child);
+                    let column = members
+                        .iter()
+                        .map(|n| part_column(*n, &depth))
+                        .min()
+                        .unwrap_or(0);
+                    let first = members.iter().map(|n| order(*n)).min().unwrap_or((0, 0));
+                    parts.push((GNode::Group(*child), column, first));
+                }
+            }
+            parts.sort_by_key(|(_, _, first)| *first);
+            let mut part_of: HashMap<RNode, usize> = HashMap::new();
+            for (i, (part, _, _)) in parts.iter().enumerate() {
+                match part {
+                    GNode::Item(n) => {
+                        part_of.insert(*n, i);
+                    }
+                    GNode::Group(c) => {
+                        for n in groups::members(&self.groups, places, *c) {
+                            part_of.insert(n, i);
+                        }
+                    }
+                }
+            }
+            let links: Vec<(usize, usize)> = self
+                .resolution
+                .wires
+                .iter()
+                .filter_map(|((from, _), (to, _))| {
+                    let (a, b) = (*part_of.get(from)?, *part_of.get(to)?);
+                    (a != b).then_some((a, b))
+                })
+                .collect();
+            let sized: Vec<(GNode, usize, Vec2)> = parts
+                .iter()
+                .map(|(part, column, _)| {
+                    let size = drawn.get(part).copied().unwrap_or_else(|| match part {
+                        GNode::Item(n) => self.estimated_size(*n),
+                        GNode::Group(_) => vec2(260.0, 160.0),
+                    });
+                    (*part, *column, size)
+                })
+                .collect();
+            let start = at + vec2(FRAME_MARGIN, FRAME_HEADER);
+            let placed = groups::local_layout(&sized, &links, start);
+            let mut frame = Rect::from_min_size(at, Vec2::ZERO);
+            for (i, pos) in placed {
+                let (part, _, size) = sized[i];
+                frame = frame.union(Rect::from_min_size(pos, size));
+                match part {
+                    GNode::Item(n) => {
+                        if let Some(place) = places.get_mut(&n) {
+                            place.pos = pos;
+                        }
+                    }
+                    GNode::Group(c) => {
+                        if let Some(child) = self.groups.get_mut(&c) {
+                            child.pos = pos;
+                        }
+                    }
+                }
+            }
+            if open_these.len() == 1 {
+                let closed = drawn
+                    .get(&GNode::Group(*g))
+                    .copied()
+                    .unwrap_or(vec2(260.0, 160.0));
+                let frame = frame.expand(FRAME_MARGIN);
+                self.make_room(*g, Rect::from_min_size(at, closed), frame, places, &drawn);
+            }
+        }
+    }
+
+    /// Moves what is drawn below `closed` (the group as it was) or to its right, by how much
+    /// bigger `open` (the group opened) is, so nothing is under it.
+    fn make_room(
+        &mut self,
+        group: GroupId,
+        closed: Rect,
+        open: Rect,
+        places: &mut Places,
+        drawn: &HashMap<GNode, Vec2>,
+    ) {
+        let right = (open.max.x - closed.max.x).max(0.0);
+        let down = (open.max.y - closed.max.y).max(0.0);
+        let shift = |rect: Rect| {
+            if rect.min.x >= closed.max.x - 1.0
+                && rect.max.y > closed.min.y
+                && rect.min.y < open.max.y
+            {
+                Some(vec2(right, 0.0))
+            } else if rect.min.y >= closed.max.y - 1.0
+                && rect.max.x > closed.min.x
+                && rect.min.x < open.max.x
+            {
+                Some(vec2(0.0, down))
+            } else {
+                None
+            }
+        };
+        let size = |node: GNode| drawn.get(&node).copied().unwrap_or(vec2(260.0, 120.0));
+        for (node, place) in places.iter_mut() {
+            let mine = groups::within(&self.groups, place.group, group);
+            let is_drawn = groups::shown_as(&self.groups, &self.nodes, *node) == GNode::Item(*node);
+            if mine || !is_drawn {
+                continue;
+            }
+            if let Some(by) = shift(Rect::from_min_size(place.pos, size(GNode::Item(*node)))) {
+                place.pos += by;
+            }
+        }
+        let ids: Vec<(NodeId, GroupId)> = self
+            .snarl
+            .node_ids()
+            .filter_map(|(id, n)| match n {
+                GNode::Group(c) if *c != group => Some((id, *c)),
+                _ => None,
+            })
+            .collect();
+        for (id, c) in ids {
+            if let Some(info) = self.snarl.get_node_info_mut(id)
+                && let Some(by) = shift(Rect::from_min_size(info.pos, size(GNode::Group(c))))
+            {
+                info.pos += by;
+            }
+        }
+    }
+
+    /// About how big a node is drawn, before it is.
+    fn estimated_size(&self, node: RNode) -> Vec2 {
+        let rows = Self::node_doc(&self.doc, node).map_or(2, |item| match &item.kind {
+            Kind::Struct { fields, .. } => fields.len(),
+            _ => 2,
+        });
+        vec2(260.0, 70.0 + 30.0 * rows as f32)
+    }
+
+    /// Moves the view to an open group's nodes.
+    fn frame_group(&mut self, group: GroupId) {
+        let rect = self
+            .snarl
+            .nodes_pos_ids()
+            .filter(|(_, _, node)| {
+                if **node == GNode::Group(group) {
+                    return true;
+                }
+                let container = match node {
+                    GNode::Item(n) => self.nodes.get(n).and_then(|p| p.group),
+                    GNode::Group(c) => self.groups.get(c).and_then(|i| i.parent),
+                };
+                groups::within(&self.groups, container, group)
+            })
+            .map(|(id, pos, _)| {
+                Rect::from_min_size(
+                    pos,
+                    self.sizes.get(&id).copied().unwrap_or(vec2(260.0, 120.0)),
+                )
+            })
+            .reduce(Rect::union);
+        if let Some(rect) = rect {
+            self.nav.show(rect);
+        }
+    }
+
+    /// Puts nodes and closed groups drawn into a new closed group, inside the innermost group
+    /// that holds them all.
+    pub fn group(&mut self, selected: &[GNode], name: Option<String>) -> Option<GroupId> {
+        if selected.is_empty() {
+            return None;
+        }
+        let mut places = self.places();
+        let shown = self.group_places();
+        let container = |node: &GNode| match node {
+            GNode::Item(n) => places.get(n).and_then(|p| p.group),
+            GNode::Group(g) => self.groups.get(g).and_then(|i| i.parent),
+        };
+        let chains: Vec<Vec<GroupId>> = selected
+            .iter()
+            .map(|n| groups::ancestors(&self.groups, container(n)))
+            .collect();
+        let parent = chains[0]
+            .iter()
+            .find(|g| chains.iter().all(|c| c.contains(g)))
+            .copied();
+        let pos = selected
+            .iter()
+            .filter_map(|n| match n {
+                GNode::Item(n) => places.get(n).map(|p| p.pos),
+                GNode::Group(g) => shown.get(g).copied().or(self.groups.get(g).map(|i| i.pos)),
+            })
+            .reduce(|a, b| pos2(a.x.min(b.x), a.y.min(b.y)))
+            .unwrap_or_default();
+        let id = self.groups.keys().max().map_or(1, |m| m + 1);
+        for node in selected {
+            match node {
+                GNode::Item(n) => {
+                    if let Some(place) = places.get_mut(n) {
+                        place.group = Some(id);
+                    }
+                }
+                GNode::Group(g) => {
+                    if let Some(info) = self.groups.get_mut(g) {
+                        info.pos = shown.get(g).copied().unwrap_or(info.pos);
+                        info.parent = Some(id);
+                    }
+                }
+            }
+        }
+        self.groups.insert(
+            id,
+            GroupInfo {
+                name: name.unwrap_or_else(|| format!("Group {id}")),
+                parent,
+                open: false,
+                pos,
+                laid_out: true,
+            },
+        );
+        self.grouped = true;
+        self.refresh(places);
+        self.focus = None;
+        self.focus_group = Some(id);
+        Some(id)
+    }
+
+    /// Takes a group away; what was in it goes into the group it was in.
+    pub fn ungroup(&mut self, group: GroupId) {
+        let mut places = self.places();
+        // Its nodes get places first, if it was never opened.
+        self.open_groups(&[group], true, &mut places);
+        let parent = self.groups.get(&group).and_then(|i| i.parent);
+        for place in places.values_mut() {
+            if place.group == Some(group) {
+                place.group = parent;
+            }
+        }
+        for info in self.groups.values_mut() {
+            if info.parent == Some(group) {
+                info.parent = parent;
+            }
+        }
+        self.groups.remove(&group);
+        self.grouped = true;
+        self.refresh(places);
+    }
+
+    /// Takes every group away.
+    pub fn ungroup_all(&mut self) {
+        let mut places = self.places();
+        let all: Vec<GroupId> = self.groups.keys().copied().collect();
+        self.open_groups(&all, true, &mut places);
+        for place in places.values_mut() {
+            place.group = None;
+        }
+        self.groups.clear();
+        self.grouped = true;
+        self.refresh(places);
+    }
+
+    pub fn rename_group(&mut self, group: GroupId, name: &str) {
+        if let Some(info) = self.groups.get_mut(&group) {
+            info.name = name.to_string();
+        }
+    }
+
+    /// Groups the recipe by its section comments, or (if `by_outputs` and it has none) by the
+    /// output each step goes into. Returns how many groups were made.
+    pub fn group_automatically(&mut self, by_outputs: bool) -> usize {
+        let mut found: Vec<(String, Vec<RNode>)> = Vec::new();
+        for (list, node) in [
+            ("steps", RNode::Step as fn(usize) -> RNode),
+            ("outputs", RNode::Output),
+        ] {
+            for (name, indices) in groups::sections(&self.doc, list) {
+                found.push((name, indices.into_iter().map(node).collect()));
+            }
+        }
+        // An output no section holds goes with the section that makes all it shows.
+        let mut section_of: HashMap<RNode, usize> = HashMap::new();
+        for (i, (_, nodes)) in found.iter().enumerate() {
+            for n in nodes {
+                section_of.insert(*n, i);
+            }
+        }
+        for o in (0..self.recipe.outputs.len()).map(RNode::Output) {
+            if section_of.contains_key(&o) {
+                continue;
+            }
+            let from: HashSet<usize> = (0..self.ports[&o].len())
+                .filter_map(|i| self.resolution.source.get(&(o, i)))
+                .filter_map(|(n, _)| section_of.get(n).copied())
+                .collect();
+            if from.len() == 1
+                && let Some(i) = from.into_iter().next()
+            {
+                found[i].1.push(o);
+            }
+        }
+        if found.is_empty() && by_outputs {
+            let ids: Vec<String> = self
+                .recipe
+                .outputs
+                .iter()
+                .map(|o| o.id().to_string())
+                .collect();
+            found = groups::by_outputs(&self.recipe, &self.resolution, &ids);
+        }
+        if found.is_empty() {
+            return 0;
+        }
+        let mut places = self.places();
+        let first = self.groups.keys().max().map_or(1, |m| m + 1);
+        for (next, (name, nodes)) in (first..).zip(&found) {
+            let pos = nodes
+                .iter()
+                .filter_map(|n| places.get(n).map(|p| p.pos))
+                .reduce(|a, b| pos2(a.x.min(b.x), a.y.min(b.y)))
+                .unwrap_or_default();
+            self.groups.insert(
+                next,
+                GroupInfo {
+                    name: name.clone(),
+                    parent: None,
+                    open: false,
+                    pos,
+                    laid_out: false,
+                },
+            );
+            for n in nodes {
+                if let Some(place) = places.get_mut(n) {
+                    place.group = Some(next);
+                }
+            }
+        }
+        self.grouped = true;
+        self.refresh(places);
+        found.len()
+    }
+
+    /// The groups, for reports: (name, how many nodes, open).
+    pub fn group_list(&self) -> Vec<(String, usize, bool)> {
+        self.groups
+            .iter()
+            .map(|(g, info)| {
+                (
+                    info.name.clone(),
+                    groups::members(&self.groups, &self.nodes, *g).len(),
+                    info.open,
+                )
+            })
+            .collect()
+    }
+
+    /// The id of the group of that name.
+    pub fn group_named(&self, name: &str) -> Result<GroupId, String> {
+        self.groups
+            .iter()
+            .find(|(_, info)| info.name == name)
+            .map(|(g, _)| *g)
+            .ok_or_else(|| format!("no group is named {name:?}"))
+    }
+
+    /// Puts nodes named as [`RecipeGraph::inspect`] names them in a new closed group.
+    pub fn group_nodes(&mut self, nodes: &[String], name: &str) -> Result<(), String> {
+        let nodes = nodes
+            .iter()
+            .map(|n| node_named(n).map(GNode::Item))
+            .collect::<Result<Vec<_>, _>>()?;
+        if let Some(n) = nodes.iter().find(|n| match n {
+            GNode::Item(n) => !self.ports.contains_key(n),
+            GNode::Group(_) => false,
+        }) {
+            return Err(format!("the recipe has no {n:?}"));
+        }
+        self.group(&nodes, Some(name.to_string()))
+            .map(|_| ())
+            .ok_or_else(|| "nothing to group".into())
     }
 }
 
@@ -2127,6 +3142,14 @@ fn trace(
         error,
         error_step,
         error_output,
+    }
+}
+
+/// The column a node goes in when its group lays it out.
+fn part_column(node: RNode, depth: &HashMap<RNode, usize>) -> usize {
+    match node {
+        RNode::Step(_) => depth.get(&node).copied().unwrap_or(0),
+        RNode::Output(_) => usize::MAX / 2,
     }
 }
 
@@ -2653,12 +3676,29 @@ struct Viewer<'a> {
     revision: u64,
     /// The node in the Inspector, and what it is made from and makes (the rest is dimmed).
     focus: Option<RNode>,
+    focus_group: Option<GroupId>,
     lineage: Option<&'a HashSet<RNode>>,
     add_query: &'a mut String,
     /// Where a new step and a new output go (after the one in the Inspector).
     insert: (Option<usize>, Option<usize>),
+    groups: &'a BTreeMap<GroupId, GroupInfo>,
+    pins: &'a HashMap<GroupId, groups::Pins>,
+    nodes: &'a Places,
+    edits: &'a mut HashMap<(RNode, String), String>,
+    /// Node sizes as last drawn, for the frames of open groups.
+    last_sizes: &'a HashMap<NodeId, Vec2>,
     changes: Vec<Change>,
+    /// Groups to open or close, ungroup, or rename.
+    group_changes: Vec<GroupChange>,
     sizes: HashMap<NodeId, Vec2>,
+}
+
+/// A change to the groups (not to the recipe) asked for while drawing.
+#[derive(Clone, Debug)]
+enum GroupChange {
+    Open(GroupId, bool),
+    Ungroup(GroupId),
+    Rename(GroupId, String),
 }
 
 impl Viewer<'_> {
@@ -2674,8 +3714,31 @@ impl Viewer<'_> {
         Some((i, &ports[i]))
     }
 
+    /// The step or output and port an output pin of a snarl node stands for.
+    fn out_at(&self, node: GNode, pin: usize) -> Option<(RNode, usize)> {
+        match node {
+            GNode::Item(node) => self.port_out(node, pin).map(|(i, _)| (node, i)),
+            GNode::Group(g) => self.pins.get(&g)?.outputs.get(pin).copied(),
+        }
+    }
+
     fn lit(&self, node: RNode) -> bool {
         self.lineage.is_none_or(|l| l.contains(&node))
+    }
+
+    /// Whether anything in a group is in the selected node's lineage.
+    fn group_lit(&self, g: GroupId) -> bool {
+        self.lineage.is_none_or(|l| {
+            l.iter()
+                .any(|n| groups::within(self.groups, self.nodes.get(n).and_then(|p| p.group), g))
+        })
+    }
+
+    fn gnode_lit(&self, node: GNode) -> bool {
+        match node {
+            GNode::Item(node) => self.lit(node),
+            GNode::Group(g) => self.group_lit(g),
+        }
     }
 
     /// What the step or output made, in short: its first line and a small preview.
@@ -2716,6 +3779,86 @@ impl Viewer<'_> {
         }
     }
 
+    /// A closed group's body: what is in it, the last picture it makes, its error, the values
+    /// shown on it, and opening it.
+    fn group_body(&mut self, g: GroupId, ui: &mut Ui) {
+        let members = groups::members(self.groups, self.nodes, g);
+        let (steps, outputs) = members.iter().fold((0, 0), |(s, o), n| match n {
+            RNode::Step(_) => (s + 1, o),
+            RNode::Output(_) => (s, o + 1),
+        });
+        ui.set_max_width(260.0);
+        let what = match outputs {
+            0 => format!("{steps} steps"),
+            n => format!("{steps} steps · {n} outputs"),
+        };
+        ui.small(RichText::new(what).color(theme::PARCHMENT_DIM));
+        let failed = members.iter().any(|n| match n {
+            RNode::Step(i) => self.trace.error_step == Some(*i),
+            RNode::Output(i) => self.trace.error_output == Some(*i),
+        });
+        if failed {
+            let error = self.trace.error.as_deref().unwrap_or_default();
+            ui.label(
+                RichText::new(format!("⚠ {error}"))
+                    .small()
+                    .color(theme::ERROR),
+            );
+        }
+        let picture = members.iter().rev().find_map(|n| {
+            let results = match n {
+                RNode::Step(_) => &self.trace.steps,
+                RNode::Output(_) => &self.trace.outputs,
+            };
+            let image = results.get(index(*n))?.as_ref()?.image.as_ref()?;
+            Some((*n, image))
+        });
+        if let Some((node, image)) = picture {
+            let texture = thumb(ui.ctx(), self.thumbs, self.revision, node, image);
+            let side = image.width.max(image.height).max(1) as f32;
+            let scale = (NODE_THUMB / side).min(1.0);
+            ui.image((
+                texture.id(),
+                vec2(image.width as f32, image.height as f32) * scale,
+            ));
+        }
+        // The values chosen to be shown on the group (a higher-level node's settings).
+        for node in &members {
+            let Some(place) = self.nodes.get(node) else {
+                continue;
+            };
+            let Some(item) = RecipeGraph::node_doc(self.doc, *node) else {
+                continue;
+            };
+            let info = variant_info(*node, item.name().unwrap_or_default());
+            for key in &place.exposed {
+                let Some(field) = item.field(key) else {
+                    continue;
+                };
+                let text = self.doc.text_of(field);
+                let about = info.and_then(|i| i.field(key));
+                let ty = about.map_or_else(|| guess_type(text), |f| f.ty);
+                let edit_key = (*node, key.clone());
+                if let Some(new) = value_row(ui, self.edits, &edit_key, about, ty, text)
+                    && new != text
+                {
+                    self.changes.push(Change::Replace {
+                        span: field.span.clone(),
+                        text: new,
+                        field: Some(edit_key),
+                    });
+                }
+            }
+        }
+        if ui
+            .small_button("Open ▸")
+            .on_hover_text("Show what is inside, here")
+            .clicked()
+        {
+            self.group_changes.push(GroupChange::Open(g, true));
+        }
+    }
+
     fn add(&mut self, template: String, step: bool, at: Pos2, index: Option<usize>) -> &mut Change {
         self.changes.push(Change::Add {
             template,
@@ -2727,22 +3870,73 @@ impl Viewer<'_> {
         });
         self.changes.last_mut().unwrap()
     }
+
+    /// The open groups drawn and the snarl nodes in each (also those in groups inside it),
+    /// innermost last.
+    fn frames(&self, snarl: &Snarl<GNode>) -> Vec<(GroupId, usize, Rect)> {
+        let mut rects: HashMap<GroupId, Rect> = HashMap::new();
+        for (id, pos, node) in snarl.nodes_pos_ids() {
+            let size = self
+                .last_sizes
+                .get(&id)
+                .copied()
+                .unwrap_or(vec2(240.0, 100.0));
+            let rect = Rect::from_min_size(pos, size);
+            let container = match node {
+                GNode::Item(n) => self.nodes.get(n).and_then(|p| p.group),
+                GNode::Group(g) => self.groups.get(g).and_then(|i| i.parent),
+            };
+            for g in groups::ancestors(self.groups, container) {
+                let r = rects.entry(g).or_insert(rect);
+                *r = r.union(rect);
+            }
+        }
+        let mut frames: Vec<(GroupId, usize, Rect)> = rects
+            .into_iter()
+            .map(|(g, r)| {
+                let depth = groups::ancestors(self.groups, Some(g)).len();
+                (
+                    g,
+                    depth,
+                    r.expand2(vec2(FRAME_MARGIN, FRAME_MARGIN))
+                        .with_min_y(r.min.y - FRAME_HEADER),
+                )
+            })
+            .collect();
+        frames.sort_by_key(|(g, depth, _)| (*depth, *g));
+        frames
+    }
 }
 
-impl SnarlViewer<RNode> for Viewer<'_> {
+/// Room around the nodes of an open group, and above them for its name.
+const FRAME_MARGIN: f32 = 16.0;
+const FRAME_HEADER: f32 = 44.0;
+
+impl SnarlViewer<GNode> for Viewer<'_> {
     fn node_frame(
         &mut self,
         default: egui::Frame,
         node: NodeId,
         _inputs: &[InPin],
         _outputs: &[OutPin],
-        snarl: &Snarl<RNode>,
+        snarl: &Snarl<GNode>,
     ) -> egui::Frame {
         let value = snarl[node];
         let frame = self.nav.frame(default, node);
-        if self.focus == Some(value) {
+        let focused = match value {
+            GNode::Item(n) => self.focus == Some(n),
+            GNode::Group(g) => self.focus_group == Some(g),
+        };
+        let frame = match value {
+            GNode::Group(_) => frame
+                .fill(theme::PANEL)
+                .stroke(Stroke::new(1.5, theme::BRASS))
+                .corner_radius(10),
+            GNode::Item(_) => frame,
+        };
+        if focused {
             frame.stroke(Stroke::new(2.0, theme::BRASS_BRIGHT))
-        } else if self.lit(value) {
+        } else if self.gnode_lit(value) {
             frame
         } else {
             frame
@@ -2756,9 +3950,9 @@ impl SnarlViewer<RNode> for Viewer<'_> {
         node: NodeId,
         _inputs: &[InPin],
         _outputs: &[OutPin],
-        snarl: &Snarl<RNode>,
+        snarl: &Snarl<GNode>,
     ) -> bool {
-        !self.lit(snarl[node])
+        !self.gnode_lit(snarl[node])
     }
 
     fn apply_node_style(
@@ -2767,7 +3961,7 @@ impl SnarlViewer<RNode> for Viewer<'_> {
         _node: NodeId,
         _inputs: &[InPin],
         _outputs: &[OutPin],
-        _snarl: &Snarl<RNode>,
+        _snarl: &Snarl<GNode>,
     ) {
         style.visuals.override_text_color = Some(theme::FAINT);
     }
@@ -2775,30 +3969,118 @@ impl SnarlViewer<RNode> for Viewer<'_> {
     fn current_transform(
         &mut self,
         to_global: &mut egui::emath::TSTransform,
-        _snarl: &mut Snarl<RNode>,
+        _snarl: &mut Snarl<GNode>,
     ) {
         self.nav.transform(to_global);
     }
 
-    fn title(&mut self, node: &RNode) -> String {
-        title(self.doc, *node)
+    fn draw_background(
+        &mut self,
+        background: Option<&BackgroundPattern>,
+        viewport: &Rect,
+        snarl_style: &SnarlStyle,
+        style: &egui::Style,
+        painter: &egui::Painter,
+        snarl: &Snarl<GNode>,
+    ) {
+        if let Some(background) = background {
+            background.draw(viewport, snarl_style, style, painter);
+        }
+        // Open groups: a frame around their nodes, deeper ones lighter.
+        for (g, depth, rect) in self.frames(snarl) {
+            let fill =
+                Color32::from_rgba_unmultiplied(0xC8, 0xA0, 0x60, (8 + 6 * depth).min(40) as u8);
+            painter.rect(
+                rect,
+                12.0,
+                fill,
+                Stroke::new(1.0, theme::BRASS_DIM),
+                egui::StrokeKind::Inside,
+            );
+            if let Some(info) = self.groups.get(&g) {
+                painter.text(
+                    rect.left_top() + vec2(14.0, 10.0),
+                    egui::Align2::LEFT_TOP,
+                    &info.name,
+                    egui::FontId::proportional(18.0),
+                    theme::BRASS_BRIGHT,
+                );
+            }
+        }
     }
 
-    fn inputs(&mut self, node: &RNode) -> usize {
-        self.ports.get(node).map_or(0, |p| inputs_of(p).len())
+    fn title(&mut self, node: &GNode) -> String {
+        match node {
+            GNode::Item(n) => title(self.doc, *n),
+            GNode::Group(g) => format!(
+                "▣ {}",
+                self.groups.get(g).map_or("Group", |i| i.name.as_str())
+            ),
+        }
     }
 
-    fn outputs(&mut self, node: &RNode) -> usize {
-        self.ports.get(node).map_or(0, |p| outputs_of(p).len())
+    fn inputs(&mut self, node: &GNode) -> usize {
+        match node {
+            GNode::Item(n) => self.ports.get(n).map_or(0, |p| inputs_of(p).len()),
+            GNode::Group(g) => self.pins.get(g).map_or(0, |p| p.inputs.len()),
+        }
+    }
+
+    fn outputs(&mut self, node: &GNode) -> usize {
+        match node {
+            GNode::Item(n) => self.ports.get(n).map_or(0, |p| outputs_of(p).len()),
+            GNode::Group(g) => self.pins.get(g).map_or(0, |p| p.outputs.len()),
+        }
     }
 
     fn show_input(
         &mut self,
         pin: &InPin,
         ui: &mut Ui,
-        snarl: &mut Snarl<RNode>,
+        snarl: &mut Snarl<GNode>,
     ) -> impl SnarlPin + 'static {
-        let node = snarl[pin.id.node];
+        let node = match snarl[pin.id.node] {
+            GNode::Item(node) => node,
+            GNode::Group(g) => {
+                let Some(input) = self.pins.get(&g).and_then(|p| p.inputs.get(pin.id.input)) else {
+                    return PinInfo::circle();
+                };
+                let Some(&(target, port)) = input.targets.first() else {
+                    return PinInfo::circle();
+                };
+                let port = &self.ports[&target][port];
+                let (kind, missing) = (port.kind, input.from.is_none());
+                let name = if port.name.is_empty() {
+                    "—"
+                } else {
+                    &port.name
+                };
+                let readers = input.targets.len();
+                ui.label(
+                    RichText::new(format!("{}: {name}", kind.label())).color(if missing {
+                        theme::ERROR
+                    } else {
+                        theme::PARCHMENT_DIM
+                    }),
+                )
+                .on_hover_text(if missing {
+                    format!(
+                        "A step inside reads the {} \"{name}\", which no earlier step makes",
+                        kind.label()
+                    )
+                } else {
+                    format!("Read by {readers} input(s) inside. Open the group to change them.")
+                });
+                let lit = self.group_lit(g) && input.from.is_some_and(|(from, _)| self.lit(from));
+                return PinInfo::circle()
+                    .with_fill(if missing {
+                        theme::ERROR
+                    } else {
+                        kind_color(kind)
+                    })
+                    .with_wire_color(if lit { kind_color(kind) } else { DIMMED });
+            }
+        };
         let Some((i, port)) = self.port_in(node, pin.id.input) else {
             return PinInfo::circle();
         };
@@ -2864,21 +4146,22 @@ impl SnarlViewer<RNode> for Viewer<'_> {
         &mut self,
         pin: &OutPin,
         ui: &mut Ui,
-        snarl: &mut Snarl<RNode>,
+        snarl: &mut Snarl<GNode>,
     ) -> impl SnarlPin + 'static {
-        let node = snarl[pin.id.node];
-        let Some((_, port)) = self.port_out(node, pin.id.output) else {
+        let shown = snarl[pin.id.node];
+        let Some((node, i)) = self.out_at(shown, pin.id.output) else {
             return PinInfo::circle();
         };
+        let port = &self.ports[&node][i];
         ui.label(RichText::new(&port.name).color(theme::PARCHMENT))
             .on_hover_text(port.kind.label());
         let color = kind_color(port.kind);
         PinInfo::circle()
             .with_fill(color)
-            .with_wire_color(if self.lit(node) { color } else { DIMMED })
+            .with_wire_color(if self.gnode_lit(shown) { color } else { DIMMED })
     }
 
-    fn has_body(&mut self, _node: &RNode) -> bool {
+    fn has_body(&mut self, _node: &GNode) -> bool {
         true
     }
 
@@ -2888,13 +4171,19 @@ impl SnarlViewer<RNode> for Viewer<'_> {
         _inputs: &[InPin],
         _outputs: &[OutPin],
         ui: &mut Ui,
-        snarl: &mut Snarl<RNode>,
+        snarl: &mut Snarl<GNode>,
     ) {
-        let node = snarl[node];
-        ui.vertical(|ui| {
-            ui.set_max_width(240.0);
-            self.result(node, ui);
-        });
+        match snarl[node] {
+            GNode::Item(node) => {
+                ui.vertical(|ui| {
+                    ui.set_max_width(240.0);
+                    self.result(node, ui);
+                });
+            }
+            GNode::Group(g) => {
+                ui.vertical(|ui| self.group_body(g, ui));
+            }
+        }
     }
 
     fn final_node_rect(
@@ -2902,31 +4191,40 @@ impl SnarlViewer<RNode> for Viewer<'_> {
         node: NodeId,
         rect: Rect,
         _ui: &mut Ui,
-        _snarl: &mut Snarl<RNode>,
+        _snarl: &mut Snarl<GNode>,
     ) {
         self.sizes.insert(node, rect.size());
     }
 
-    fn connect(&mut self, from: &OutPin, to: &InPin, snarl: &mut Snarl<RNode>) {
-        let (from_node, to_node) = (snarl[from.id.node], snarl[to.id.node]);
-        if let (Some((a, _)), Some((b, _))) = (
-            self.port_out(from_node, from.id.output),
-            self.port_in(to_node, to.id.input),
-        ) {
-            self.changes.push(Change::Wire {
-                from: (from_node, a),
-                to: (to_node, b),
-            });
+    fn connect(&mut self, from: &OutPin, to: &InPin, snarl: &mut Snarl<GNode>) {
+        let Some(from) = self.out_at(snarl[from.id.node], from.id.output) else {
+            return;
+        };
+        match snarl[to.id.node] {
+            GNode::Item(to_node) => {
+                if let Some((b, _)) = self.port_in(to_node, to.id.input) {
+                    self.changes.push(Change::Wire {
+                        from,
+                        to: (to_node, b),
+                    });
+                }
+            }
+            GNode::Group(g) => {
+                // One input of a group can be read by several inside: open it to choose.
+                self.group_changes.push(GroupChange::Open(g, true));
+            }
         }
     }
 
     // A wire is a name: it goes away when the input reads something else (click the input).
-    fn disconnect(&mut self, _from: &OutPin, _to: &InPin, _snarl: &mut Snarl<RNode>) {}
+    fn disconnect(&mut self, _from: &OutPin, _to: &InPin, _snarl: &mut Snarl<GNode>) {}
 
-    fn drop_outputs(&mut self, _pin: &OutPin, _snarl: &mut Snarl<RNode>) {}
+    fn drop_outputs(&mut self, _pin: &OutPin, _snarl: &mut Snarl<GNode>) {}
 
-    fn drop_inputs(&mut self, pin: &InPin, snarl: &mut Snarl<RNode>) {
-        let node = snarl[pin.id.node];
+    fn drop_inputs(&mut self, pin: &InPin, snarl: &mut Snarl<GNode>) {
+        let GNode::Item(node) = snarl[pin.id.node] else {
+            return;
+        };
         if let Some((i, _)) = self.port_in(node, pin.id.input) {
             self.changes.push(Change::Rename {
                 at: (node, i),
@@ -2935,7 +4233,7 @@ impl SnarlViewer<RNode> for Viewer<'_> {
         }
     }
 
-    fn has_node_menu(&mut self, _node: &RNode) -> bool {
+    fn has_node_menu(&mut self, _node: &GNode) -> bool {
         true
     }
 
@@ -2945,9 +4243,51 @@ impl SnarlViewer<RNode> for Viewer<'_> {
         _inputs: &[InPin],
         _outputs: &[OutPin],
         ui: &mut Ui,
-        snarl: &mut Snarl<RNode>,
+        snarl: &mut Snarl<GNode>,
     ) {
-        let node = snarl[node];
+        let node = match snarl[node] {
+            GNode::Item(node) => node,
+            GNode::Group(g) => {
+                if ui.button("Open  (double-click)").clicked() {
+                    self.group_changes.push(GroupChange::Open(g, true));
+                    ui.close();
+                }
+                let name = self
+                    .groups
+                    .get(&g)
+                    .map_or(String::new(), |i| i.name.clone());
+                let id = egui::Id::new(("rename group", g));
+                let mut text = ui
+                    .data(|d| d.get_temp::<String>(id))
+                    .unwrap_or(name.clone());
+                ui.horizontal(|ui| {
+                    ui.label(kit::dim("Name"));
+                    let response = ui.text_edit_singleline(&mut text);
+                    if response.lost_focus() && text.trim() != name && !text.trim().is_empty() {
+                        self.group_changes
+                            .push(GroupChange::Rename(g, text.trim().to_string()));
+                    }
+                });
+                ui.data_mut(|d| d.insert_temp(id, text));
+                if ui
+                    .button("Ungroup")
+                    .on_hover_text("Its nodes stay, outside a group")
+                    .clicked()
+                {
+                    self.group_changes.push(GroupChange::Ungroup(g));
+                    ui.close();
+                }
+                if ui
+                    .button(RichText::new("Remove its steps").color(theme::ERROR))
+                    .clicked()
+                {
+                    let members = groups::members(self.groups, self.nodes, g);
+                    self.changes.push(Change::Remove(members));
+                    ui.close();
+                }
+                return;
+            }
+        };
         let (earlier, later) = match node {
             RNode::Step(_) => ("Run earlier  (Alt+↑)", "Run later  (Alt+↓)"),
             RNode::Output(_) => ("Move up  (Alt+↑)", "Move down  (Alt+↓)"),
@@ -2962,13 +4302,19 @@ impl SnarlViewer<RNode> for Viewer<'_> {
         pick(later, Change::Move { node, later: true });
         pick("Duplicate  (Ctrl+D)", Change::Duplicate(node));
         pick("Remove  (Delete)", Change::Remove(vec![node]));
+        if let Some(g) = self.nodes.get(&node).and_then(|p| p.group)
+            && ui.button("Close its group").clicked()
+        {
+            self.group_changes.push(GroupChange::Open(g, false));
+            ui.close();
+        }
     }
 
-    fn has_graph_menu(&mut self, _pos: Pos2, _snarl: &mut Snarl<RNode>) -> bool {
+    fn has_graph_menu(&mut self, _pos: Pos2, _snarl: &mut Snarl<GNode>) -> bool {
         true
     }
 
-    fn show_graph_menu(&mut self, pos: Pos2, ui: &mut Ui, _snarl: &mut Snarl<RNode>) {
+    fn show_graph_menu(&mut self, pos: Pos2, ui: &mut Ui, _snarl: &mut Snarl<GNode>) {
         ui.set_width(320.0);
         ui.label(kit::hint(if self.insert.0.is_some() {
             "Add after the selected step"
@@ -2981,8 +4327,12 @@ impl SnarlViewer<RNode> for Viewer<'_> {
         }
     }
 
-    fn has_dropped_wire_menu(&mut self, src_pins: AnyPins, _snarl: &mut Snarl<RNode>) -> bool {
-        matches!(src_pins, AnyPins::Out([_]) | AnyPins::In([_]))
+    fn has_dropped_wire_menu(&mut self, src_pins: AnyPins, snarl: &mut Snarl<GNode>) -> bool {
+        match src_pins {
+            AnyPins::Out([_]) => true,
+            AnyPins::In([to]) => matches!(snarl[to.node], GNode::Item(_)),
+            _ => false,
+        }
     }
 
     fn show_dropped_wire_menu(
@@ -2990,15 +4340,15 @@ impl SnarlViewer<RNode> for Viewer<'_> {
         pos: Pos2,
         ui: &mut Ui,
         src_pins: AnyPins,
-        snarl: &mut Snarl<RNode>,
+        snarl: &mut Snarl<GNode>,
     ) {
         ui.set_width(320.0);
         match src_pins {
             AnyPins::Out([from]) => {
-                let node = snarl[from.node];
-                let Some((_, port)) = self.port_out(node, from.output) else {
+                let Some((node, i)) = self.out_at(snarl[from.node], from.output) else {
                     return;
                 };
+                let port = &self.ports[&node][i];
                 let (kind, name) = (port.kind, port.name.clone());
                 ui.label(kit::hint(format!("Use {} \"{name}\" in", kind.label())));
                 // Right after the step that makes it.
@@ -3015,7 +4365,9 @@ impl SnarlViewer<RNode> for Viewer<'_> {
                 }
             }
             AnyPins::In([to]) => {
-                let node = snarl[to.node];
+                let GNode::Item(node) = snarl[to.node] else {
+                    return;
+                };
                 let Some((i, port)) = self.port_in(node, to.input) else {
                     return;
                 };
@@ -3335,17 +4687,152 @@ Recipe(
     }
 
     #[test]
+    fn a_closed_group_is_one_node_with_what_crosses_its_edge() {
+        let mut graph = graph();
+        let items = [0, 1, 4].map(|i| GNode::Item(RNode::Step(i)));
+        let group = graph.group(&items, Some("Sheet".into())).unwrap();
+        // Two steps and the output stay, and the group stands for the three.
+        assert_eq!(graph.snarl.node_ids().count(), 4);
+        assert!(
+            graph
+                .snarl
+                .node_ids()
+                .any(|(_, n)| *n == GNode::Group(group))
+        );
+        let pins = &graph.pins[&group];
+        // It reads the palette from outside and makes the sheet the output uses.
+        assert_eq!(pins.inputs.len(), 1);
+        assert_eq!(pins.inputs[0].from.map(|(n, _)| n), Some(RNode::Step(3)));
+        assert_eq!(pins.outputs.len(), 1);
+        assert_eq!(pins.outputs[0].0, RNode::Step(4));
+        // The palette into its bank, the bank into the group, the group into the output.
+        assert_eq!(graph.snarl.wires().count(), 3);
+
+        graph.set_group_open(group, true);
+        assert_eq!(graph.snarl.node_ids().count(), 6);
+        assert_eq!(graph.snarl.wires().count(), graph.resolution.wires.len());
+
+        graph.ungroup(group);
+        assert!(graph.groups.is_empty());
+        assert!(graph.nodes.values().all(|p| p.group.is_none()));
+    }
+
+    #[test]
+    fn groups_come_back_with_their_nodes_after_steps_are_added_before_them() {
+        let mut graph = graph();
+        let items = [3, 4].map(|i| GNode::Item(RNode::Step(i)));
+        graph.group(&items, Some("Sheet".into())).unwrap();
+        let layout = graph.layout();
+        assert_eq!(layout.groups.len(), 1);
+        assert_eq!(layout.groups[0].members.len(), 2);
+
+        // A step put first moves every index; the keys still find the group's nodes.
+        let text = RECIPE.replace(
+            "        // Tiles and palettes.",
+            "        Fill(name: \"pad\", size: 1),\n        // Tiles and palettes.",
+        );
+        let again = RecipeGraph::new(text, &layout, None).unwrap();
+        let (id, _) = again.groups.iter().next().unwrap();
+        let mut members = groups::members(&again.groups, &again.nodes, *id);
+        members.sort_by_key(|n| order(*n));
+        assert_eq!(members, vec![RNode::Step(4), RNode::Step(5)]);
+        assert!(again.nodes[&RNode::Step(0)].group.is_none());
+    }
+
+    #[test]
+    fn an_opened_group_is_a_grid_and_what_was_below_it_moves_down() {
+        let mut text = String::from("Recipe(steps: [\n");
+        for i in 0..30 {
+            if i % 10 == 0 {
+                text.push_str(&format!("// == S{i} ==\n"));
+            }
+            text.push_str(&format!("Fill(name: \"s{i}\", size: 1),\n"));
+        }
+        text.push_str("], outputs: [])");
+        let mut graph = RecipeGraph::new(text, &RecipeLayout::default(), None).unwrap();
+        assert_eq!(graph.group_automatically(false), 3);
+        graph.arrange();
+        let group = graph.group_named("S10").unwrap();
+        graph.set_group_open(group, true);
+        let rects: Vec<Rect> = graph
+            .snarl
+            .nodes_pos_ids()
+            .map(|(_, pos, node)| {
+                let size = match node {
+                    GNode::Item(n) => graph.estimated_size(*n),
+                    GNode::Group(_) => vec2(260.0, 120.0),
+                };
+                Rect::from_min_size(pos, size)
+            })
+            .collect();
+        // Ten unwired steps open as rows of several, not one column of ten.
+        let xs: HashSet<i32> = rects.iter().map(|r| r.min.x as i32).collect();
+        assert!(xs.len() > 2);
+        for (i, a) in rects.iter().enumerate() {
+            for b in &rects[i + 1..] {
+                assert!(!a.intersects(*b), "{a:?} overlaps {b:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn undoing_a_removal_gives_every_node_its_own_group_back() {
+        let mut graph = graph();
+        let items = [3, 4].map(|i| GNode::Item(RNode::Step(i)));
+        let group = graph.group(&items, Some("Sheet".into())).unwrap();
+        graph.apply(Change::Remove(vec![RNode::Step(0)])).unwrap();
+        graph.undo();
+        assert_eq!(graph.recipe.steps.len(), 5);
+        assert!(graph.nodes[&RNode::Step(2)].group.is_none());
+        assert_eq!(graph.nodes[&RNode::Step(3)].group, Some(group));
+        assert_eq!(graph.nodes[&RNode::Step(4)].group, Some(group));
+    }
+
+    #[test]
+    fn layouts_saved_by_index_still_load() {
+        let layout = RecipeLayout {
+            steps: (0..5)
+                .map(|i| ("Fill".to_string(), (i as f32 * 10.0, 0.0)))
+                .collect(),
+            ..RecipeLayout::default()
+        };
+        let graph = RecipeGraph::new(RECIPE.into(), &layout, None).unwrap();
+        assert_eq!(graph.nodes[&RNode::Step(1)].pos, pos2(10.0, 0.0));
+    }
+
+    #[test]
+    fn big_recipes_are_grouped_by_what_they_make() {
+        let mut text = String::from("Recipe(steps: [\n");
+        for i in 0..groups::AUTO_GROUP_BY_OUTPUTS {
+            text.push_str(&format!("Fill(name: \"s{i}\", size: 1),\n"));
+        }
+        text.push_str("], outputs: [\n");
+        for i in 0..groups::AUTO_GROUP_BY_OUTPUTS {
+            text.push_str(&format!("Image(id: \"o{i}\", from: \"s{i}\"),\n"));
+        }
+        text.push_str("])");
+        let graph = RecipeGraph::new(text, &RecipeLayout::default(), None).unwrap();
+        assert!(!graph.groups.is_empty());
+        assert!(graph.snarl.node_ids().count() < 2 * groups::AUTO_GROUP_BY_OUTPUTS);
+    }
+
+    #[test]
     fn the_layout_comes_back_by_place_and_variant() {
         let mut graph = graph();
         let id = graph
             .snarl
             .node_ids()
-            .find(|(_, n)| **n == RNode::Step(2))
+            .find(|(_, n)| **n == GNode::Item(RNode::Step(2)))
             .unwrap()
             .0;
         graph.snarl.get_node_info_mut(id).unwrap().pos = pos2(10.0, 20.0);
         let layout = graph.layout();
-        assert_eq!(layout.steps[2], ("Literal".to_string(), (10.0, 20.0)));
+        let key = layout
+            .nodes
+            .iter()
+            .find(|(_, at)| **at == (10.0, 20.0))
+            .map(|(key, _)| key.clone());
+        assert!(key.is_some_and(|k| k.starts_with("Literal:")));
         let again = RecipeGraph::new(RECIPE.into(), &layout, None).unwrap();
         assert!(!again.arrange_pending);
         assert_eq!(again.layout(), layout);
@@ -3484,10 +4971,10 @@ Recipe(
         assert_eq!(shown, "(\n    a: 1,\n      b: 2,\n)");
         assert_eq!(reindented(&shown, "", &indent), nested);
         let mut places = Places::new();
-        places.insert(RNode::Step(1), (Pos2::ZERO, false));
-        places.insert(RNode::Output(0), (Pos2::ZERO, true));
+        places.insert(RNode::Step(1), Place::at(Pos2::ZERO));
+        places.insert(RNode::Output(0), Place::at(pos2(1.0, 1.0)));
         let places = remap(places, |n| Some(shifted(n, RNode::Step(0))));
-        assert_eq!(places[&RNode::Step(2)], (Pos2::ZERO, false));
+        assert_eq!(places[&RNode::Step(2)], Place::at(Pos2::ZERO));
         assert!(places.contains_key(&RNode::Output(0)));
     }
 

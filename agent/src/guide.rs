@@ -31,7 +31,8 @@ pub const RECIPE_GUIDE: &str = r#"# Recipe format (recipe.ron)
 
 A recipe is RON: `Recipe(steps: [...], outputs: [...])`. Steps run in order and work on named
 values: buffers (bytes), palette banks, images. Comments (`//`) are allowed; use them to cite
-where each offset comes from.
+where each offset comes from. In a recipe of more than a few dozen steps, start each part with a
+section comment such as `// == Title screen ==`: the editor folds each section into one node.
 
 ## Steps
 
