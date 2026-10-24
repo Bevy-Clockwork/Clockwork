@@ -386,8 +386,11 @@ Godot's FileSystem dock and Blender's Asset Browser (non-modal, non-blocking, se
 - **Selection:** a click selects an item for the Inspector, Ctrl+click adds one (or takes it
   out), and dragging a selected item into the viewport places every selected placeable item,
   side by side. The remote control's `BrowserView(list, "search")` sets the view.
-- **Appear by themselves:** plugin folders are checked every 2 s (file names and modification
-  times); new, changed or removed plugins update the browser without Rescan. The selected and
+- **Appear by themselves:** plugin folders are watched (`notify`: the system reports changes to
+  a plugin's `clockwork.toml`, `recipe.ron` or `compose.ron`, or a plugin folder added or
+  removed, and they are read once things are quiet for 0.3 s; where folders can't be watched
+  they are checked every 2 s by file names and modification times); new, changed or removed
+  plugins update the browser without Rescan. The selected and
   loaded plugin are kept across rescans. Only plugins that changed, and those using them, are
   extracted again.
 - **Previews** are drawn in the background from the Workshop's extraction, one plugin at a
@@ -709,6 +712,9 @@ screen's layout (plugins on the left, the selected one on the right):
   other plugins.
 - **Plugins from your games** have two tabs. **Recipe** (`editor/src/recipe_graph.rs`) draws the
   recipe as a node graph: a node per step and per output, wired by the names steps make and use.
+  The file holds the graph's state and its changes; beside it in `recipe_graph/` are the model
+  (nodes, ports and wires), the run (`trace`), the add templates, the controls inside nodes
+  (`widgets`) and how egui-snarl draws it all (`viewer`).
   Every step and output lists those names with how it uses them (`Step::ports`, `Output::ports`
   in `core`: read, write, update, or grow, which makes the name if no earlier step did), so
   wires follow the recipe's order; an input nothing earlier makes shows red. Each node edits its
@@ -723,7 +729,9 @@ screen's layout (plugins on the left, the selected one on the right):
   it; Delete removes the selected nodes. Buffers show their first bytes in hex, sprites their
   first frame, and outputs what the whole recipe made of them (or the error of the output that
   failed). After a change the recipe runs again in the background (nodes show the last run
-  until it is done). Undo/Redo (and Ctrl+Z/Ctrl+Y) cover every change.
+  until it is done), and only from the change on: a run keeps what the steps had made every 16
+  steps (`clockwork_recipe::run_from` goes on from such a point, up to 256 MB of them), so an
+  edit to step 150 of 180 runs about 40 steps, not 180. Undo/Redo (and Ctrl+Z/Ctrl+Y) cover every change.
   The graph is a view over `recipe.ron` as text (`clockwork_recipe::text`: where every value sits
   in RON): each change replaces a span and is parsed again before it is kept, so the agent's
   comments survive and nothing the format can't hold is written. **Save** writes `recipe.ron` and

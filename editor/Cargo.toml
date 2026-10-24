@@ -20,6 +20,7 @@ clockwork_runtime.workspace = true
 directories.workspace = true
 egui-snarl = "0.12"
 image.workspace = true
+notify.workspace = true
 rfd.workspace = true
 ron.workspace = true
 serde.workspace = true

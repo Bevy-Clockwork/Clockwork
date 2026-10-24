@@ -30,12 +30,14 @@ use crate::{
     settings::Settings,
     state::{EditorState, LogLevel, plugin_dirs},
     store, theme,
+    watch::PluginWatcher,
     workshop::Extractions,
 };
 
 /// Previews are stored at most this many pixels on their longer side.
 const PREVIEW_MAX: u32 = 256;
-/// How often plugin folders are checked for changes, in seconds.
+/// How often plugin folders are looked over when they can't be watched (and checked for new
+/// content folders), in seconds.
 const POLL_SECONDS: f64 = 2.0;
 
 /// One thing a plugin provides.
@@ -130,6 +132,9 @@ pub struct Browser {
     pub failed: HashMap<String, String>,
     /// The plugin whose previews are being generated.
     pub generating: Option<String>,
+    /// Reports plugin files changed on disk.
+    watcher: Option<PluginWatcher>,
+    /// Where the plugins were last looked over, when they can't be watched.
     fingerprint: u64,
     last_poll: f64,
     /// Every asset, as last listed, and what it was listed for (see [`items_key`]).
@@ -179,6 +184,7 @@ impl Default for Browser {
             handled: HashSet::new(),
             failed: HashMap::new(),
             generating: None,
+            watcher: None,
             fingerprint: 0,
             last_poll: f64::NEG_INFINITY,
             items: None,
@@ -388,15 +394,30 @@ pub fn browser_system(
     let ctx = contexts.ctx_mut()?.clone();
     let now = ctx.input(|i| i.time);
 
-    // New, changed or removed plugins show up by themselves.
-    if settings.watch_plugins && now - browser.last_poll > POLL_SECONDS {
-        browser.last_poll = now;
-        let print = fingerprint();
-        if browser.fingerprint != 0 && print != browser.fingerprint {
+    // New, changed or removed plugins show up by themselves: the system reports changes, and
+    // where it can't, the plugin folders are looked over every few seconds.
+    if settings.watch_plugins {
+        let browser = &mut *browser;
+        let watcher = (browser.watcher).get_or_insert_with(|| PluginWatcher::new(plugin_dirs()));
+        let mut changed = watcher.poll(now);
+        if now - browser.last_poll > POLL_SECONDS {
+            browser.last_poll = now;
+            if watcher.is_stale(plugin_dirs()) {
+                *watcher = PluginWatcher::new(plugin_dirs());
+                changed = true;
+            }
+            if !watcher.is_watching() {
+                let print = fingerprint();
+                changed |= browser.fingerprint != 0 && print != browser.fingerprint;
+                browser.fingerprint = print;
+            }
+        }
+        if changed {
             state.scan_plugins();
             state.log(LogLevel::Info, "Plugins changed; content updated");
         }
-        browser.fingerprint = print;
+    } else {
+        browser.watcher = None;
     }
 
     // A finished preview job.

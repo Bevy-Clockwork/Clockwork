@@ -240,17 +240,19 @@ impl Extracted {
     }
 }
 
-/// What a recipe has made so far, as [`run_observed`] shows it after each step.
-pub struct Made<'a> {
-    buffers: &'a HashMap<&'a str, Vec<u8>>,
-    banks: &'a HashMap<&'a str, PaletteBank>,
-    images: &'a HashMap<&'a str, RgbaImage>,
-    models: &'a HashMap<&'a str, Model>,
-    collisions: &'a HashMap<&'a str, Collision>,
-    sprites: &'a HashMap<&'a str, Sprite>,
+/// What a recipe has made so far, as [`run_observed`] shows it after each step. Kept (cloned)
+/// after a step, it is where [`run_from`] goes on from.
+#[derive(Debug, Clone, Default)]
+pub struct Made {
+    buffers: HashMap<String, Vec<u8>>,
+    banks: HashMap<String, PaletteBank>,
+    images: HashMap<String, RgbaImage>,
+    models: HashMap<String, Model>,
+    collisions: HashMap<String, Collision>,
+    sprites: HashMap<String, Sprite>,
 }
 
-impl Made<'_> {
+impl Made {
     pub fn buffer(&self, name: &str) -> Option<&[u8]> {
         self.buffers.get(name).map(Vec::as_slice)
     }
@@ -273,6 +275,18 @@ impl Made<'_> {
 
     pub fn sprite(&self, name: &str) -> Option<&Sprite> {
         self.sprites.get(name)
+    }
+
+    /// About how much memory its buffers and images take, in bytes, to decide whether keeping
+    /// a copy is worth it.
+    pub fn bytes(&self) -> usize {
+        let buffers: usize = self.buffers.values().map(Vec::len).sum();
+        let images: usize = self.images.values().map(|i| i.pixels.len()).sum();
+        let sprites: usize = (self.sprites.values())
+            .flat_map(|s| &s.frames)
+            .map(|f| f.image.pixels.len())
+            .sum();
+        buffers + images + sprites
     }
 }
 
@@ -313,23 +327,39 @@ pub fn run_observed(
     recipe: &Recipe,
     rom: &[u8],
     assets: &dyn AssetSource,
+    observe: impl FnMut(usize, &Made),
+) -> Result<Extracted, RecipeError> {
+    run_from(recipe, rom, assets, Made::default(), 0, observe)
+}
+
+/// Runs a recipe from step `from` on, given what the steps before it made (as [`run_observed`]
+/// showed it after step `from - 1`), so a change to step `from` or later runs only from there.
+pub fn run_from(
+    recipe: &Recipe,
+    rom: &[u8],
+    assets: &dyn AssetSource,
+    mut made: Made,
+    from: usize,
     mut observe: impl FnMut(usize, &Made),
 ) -> Result<Extracted, RecipeError> {
-    let part = |id: &String| {
-        let id = id.clone();
-        move |e: asset::ResolveError| RecipeError::Part {
-            id,
-            message: e.to_string(),
-        }
-    };
-    let mut buffers: HashMap<&str, Vec<u8>> = HashMap::new();
-    let mut banks: HashMap<&str, PaletteBank> = HashMap::new();
-    let mut images: HashMap<&str, RgbaImage> = HashMap::new();
-    let mut models: HashMap<&str, Model> = HashMap::new();
-    let mut collisions: HashMap<&str, Collision> = HashMap::new();
-    let mut sprites: HashMap<&str, Sprite> = HashMap::new();
+    for (step, s) in recipe.steps.iter().enumerate().skip(from) {
+        run_step(step, s, rom, &mut made)?;
+        observe(step, &made);
+    }
+    outputs(recipe, &made, assets)
+}
 
-    for (step, s) in recipe.steps.iter().enumerate() {
+/// Runs one step on what was made before it.
+fn run_step(step: usize, s: &Step, rom: &[u8], made: &mut Made) -> Result<(), RecipeError> {
+    let Made {
+        buffers,
+        banks,
+        images,
+        models,
+        collisions,
+        sprites,
+    } = made;
+    {
         let unknown = |kind, name: &str| RecipeError::Unknown {
             step,
             kind,
@@ -363,23 +393,23 @@ pub fn run_observed(
                             .to_vec()
                     }
                 };
-                buffers.insert(name, bytes);
+                buffers.insert(name.clone(), bytes);
             }
             Step::Fill { name, size, value } => {
                 within(step, "a filled buffer", u64::from(*size), MAX_FILL)?;
-                buffers.insert(name, vec![*value; *size as usize]);
+                buffers.insert(name.clone(), vec![*value; *size as usize]);
             }
             Step::Literal { name, hex } => {
                 let bytes =
                     parse_hex(hex).map_err(|message| RecipeError::Literal { step, message })?;
-                buffers.insert(name, bytes);
+                buffers.insert(name.clone(), bytes);
             }
             Step::Crop { from, region, into } => {
                 let image = images
                     .get(from.as_str())
                     .ok_or_else(|| unknown("image", from))?;
                 let cropped = image.crop(region.x, region.y, region.w, region.h);
-                images.insert(into, cropped);
+                images.insert(into.clone(), cropped);
             }
             Step::Text {
                 from,
@@ -396,7 +426,7 @@ pub fn run_observed(
                     .ok_or_else(|| unknown("buffer", from))?;
                 let text = decode_text(bytes, *at, runs, codes, (*end, *length), other.as_deref())
                     .map_err(|message| RecipeError::Decode { step, message })?;
-                buffers.insert(into, text.into_bytes());
+                buffers.insert(into.clone(), text.into_bytes());
             }
             Step::Canvas {
                 name,
@@ -405,7 +435,7 @@ pub fn run_observed(
             } => {
                 let pixels = u64::from(*width) * u64::from(*height);
                 within(step, "a canvas", pixels, MAX_CANVAS_PIXELS)?;
-                images.insert(name, RgbaImage::new(*width, *height));
+                images.insert(name.clone(), RgbaImage::new(*width, *height));
             }
             Step::Paste { from, into, at } => {
                 let source = images
@@ -464,14 +494,14 @@ pub fn run_observed(
                             "{width}x{height} {format:?} texels don't fit at {at:#x} of \"{from}\" (or the palette is short)"
                         ),
                     })?;
-                images.insert(into, image);
+                images.insert(into.clone(), image);
             }
             Step::Place { from, into, at } => {
                 let src = buffers
                     .get(from.as_str())
                     .ok_or_else(|| unknown("buffer", from))?
                     .clone();
-                let dst = buffers.entry(into).or_default();
+                let dst = buffers.entry(into.clone()).or_default();
                 let end = *at as usize + src.len();
                 if dst.len() < end {
                     dst.resize(end, 0);
@@ -482,7 +512,10 @@ pub fn run_observed(
                 let data = buffers
                     .get(from.as_str())
                     .ok_or_else(|| unknown("buffer", from))?;
-                banks.entry(bank).or_default().load(data, *slot as usize);
+                banks
+                    .entry(bank.clone())
+                    .or_default()
+                    .load(data, *slot as usize);
             }
             Step::GbaMetatiles {
                 tiles,
@@ -502,7 +535,7 @@ pub fn run_observed(
                 let bank = banks
                     .get(bank.as_str())
                     .ok_or_else(|| unknown("palette bank", bank))?;
-                images.insert(into, render_metatiles(tiles, meta, bank, *columns));
+                images.insert(into.clone(), render_metatiles(tiles, meta, bank, *columns));
             }
             Step::GbaMetatileMap {
                 tiles,
@@ -526,7 +559,10 @@ pub fn run_observed(
                 let bank = banks
                     .get(bank.as_str())
                     .ok_or_else(|| unknown("palette bank", bank))?;
-                images.insert(into, render_metatile_map(tiles, meta, map, *width, bank));
+                images.insert(
+                    into.clone(),
+                    render_metatile_map(tiles, meta, map, *width, bank),
+                );
             }
             Step::Lookup {
                 indices,
@@ -554,7 +590,7 @@ pub fn run_observed(
                             })?;
                     value.write(&mut out, v);
                 }
-                buffers.insert(into, out);
+                buffers.insert(into.clone(), out);
             }
             Step::Overlay {
                 from,
@@ -587,8 +623,8 @@ pub fn run_observed(
                 bones,
                 into,
             } => {
-                let model = n64_model(step, &buffers, segments, bones)?;
-                models.insert(into, model);
+                let model = n64_model(step, buffers, segments, bones)?;
+                models.insert(into.clone(), model);
             }
             Step::CollisionTriangles {
                 from,
@@ -605,7 +641,7 @@ pub fn run_observed(
                         message: e.to_string(),
                     }
                 })?;
-                collisions.insert(into, collision);
+                collisions.insert(into.clone(), collision);
             }
             Step::ChannelAnimation {
                 from,
@@ -649,9 +685,9 @@ pub fn run_observed(
                 into,
             } => {
                 let built = sprite::object_frames(
-                    step, &buffers, &banks, tiles, bank, objects, layout, frames,
+                    step, buffers, banks, tiles, bank, objects, layout, frames,
                 )?;
-                sprites.insert(into, built);
+                sprites.insert(into.clone(), built);
             }
             Step::MergeSprite { from, into } => {
                 let source = sprites
@@ -700,19 +736,31 @@ pub fn run_observed(
                 target.animations.push(animation);
             }
         }
-        observe(
-            step,
-            &Made {
-                buffers: &buffers,
-                banks: &banks,
-                images: &images,
-                models: &models,
-                collisions: &collisions,
-                sprites: &sprites,
-            },
-        );
     }
+    Ok(())
+}
 
+/// What a recipe's outputs are, from what its steps made.
+fn outputs(
+    recipe: &Recipe,
+    made: &Made,
+    assets: &dyn AssetSource,
+) -> Result<Extracted, RecipeError> {
+    let part = |id: &String| {
+        let id = id.clone();
+        move |e: asset::ResolveError| RecipeError::Part {
+            id,
+            message: e.to_string(),
+        }
+    };
+    let Made {
+        buffers,
+        images,
+        models,
+        collisions,
+        sprites,
+        ..
+    } = made;
     let mut extracted = Extracted::default();
     for output in &recipe.outputs {
         match output {
@@ -1112,7 +1160,7 @@ fn mio0_decompress(data: &[u8]) -> Result<Vec<u8>, String> {
 /// carries over between lists, as on the console.
 fn n64_model(
     step: usize,
-    buffers: &HashMap<&str, Vec<u8>>,
+    buffers: &HashMap<String, Vec<u8>>,
     segments: &std::collections::BTreeMap<u8, String>,
     bones: &[clockwork_core::recipe::ModelBone],
 ) -> Result<Model, RecipeError> {
@@ -1446,6 +1494,34 @@ mod tests {
         )
         .unwrap();
         assert!(run(&bad, &[]).is_err(), "too few texels is an error");
+    }
+
+    #[test]
+    fn a_run_goes_on_from_what_was_kept() {
+        let recipe: Recipe = ron::from_str(
+            r#"(steps: [
+                Literal(name: "texels", hex: "00 00 F8 01 07 C0"),
+                N64Texture(from: "texels", at: 2, format: Rgba16, width: 2, height: 1, into: "pair"),
+                Canvas(name: "sheet", width: 4, height: 2),
+                Paste(from: "pair", into: "sheet", at: (1, 1)),
+                Paste(from: "pair", into: "sheet", at: (3, 0)),
+            ], outputs: [Image(id: "sheet", from: "sheet")])"#,
+        )
+        .unwrap();
+        let mut kept = None;
+        let full = run_observed(&recipe, &[], &asset::Builtins, |i, made| {
+            if i == 2 {
+                kept = Some(made.clone());
+            }
+        })
+        .unwrap();
+        let mut seen = Vec::new();
+        let rest = run_from(&recipe, &[], &asset::Builtins, kept.unwrap(), 3, |i, _| {
+            seen.push(i)
+        })
+        .unwrap();
+        assert_eq!(seen, [3, 4], "only the steps after what was kept run");
+        assert_eq!(rest.images[0].1.pixels, full.images[0].1.pixels);
     }
 
     #[test]

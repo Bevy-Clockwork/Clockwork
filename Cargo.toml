@@ -39,6 +39,7 @@ bevy = { version = "0.20", features = ["wav"] }
 bevy_egui = "0.43"
 directories = "6"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+notify = "8"
 rfd = "0.17"
 ron = "0.12"
 serde = { version = "1", features = ["derive"] }
