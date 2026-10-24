@@ -145,6 +145,8 @@ mod tests {
                 break;
             }
         }
+        // Stop watching before the folder goes: Windows keeps a watched folder open.
+        drop(watcher);
         std::fs::remove_dir_all(&dir).ok();
         assert!(reported);
     }
