@@ -273,6 +273,10 @@ pub enum Step {
         /// Walking into the placement takes the player to another node.
         #[serde(default)]
         door: Option<Box<PlaceDoor>>,
+        /// The animation each placement's sprite or model plays: things that show one frame
+        /// chosen by their record (a sign's type) name it here.
+        #[serde(default)]
+        animation: Option<Box<Template>>,
         /// What `MarkPlaces` writes into the cells: this field's value, else the record's number
         /// from 1.
         #[serde(default)]

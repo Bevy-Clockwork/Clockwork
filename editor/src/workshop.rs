@@ -541,6 +541,9 @@ fn add_scene(
             output: output.clone(),
         });
         let id = scene.add(parent, node.name.clone(), item, Vec3::from(node.position));
+        if let Some(added) = scene.get_mut(id) {
+            added.animation = node.animation.clone();
+        }
         if let Some(door) = &node.door
             && let Some(added) = scene.get_mut(id)
         {
@@ -1210,6 +1213,7 @@ mod tests {
                     radius: 0.5,
                     fade: 0.6,
                 }),
+                animation: item.map(|_| "still".to_string()),
             };
         let template = SceneTemplate {
             nodes: vec![
@@ -1243,6 +1247,7 @@ mod tests {
         let slime = scene.nodes.iter().find(|n| n.name == "Slime").unwrap();
         assert_eq!(slime.item.as_ref().unwrap().output, "slime");
         assert_eq!(slime.position, [1.0, 0.0, 2.0]);
+        assert_eq!(slime.animation.as_deref(), Some("still"));
         let door = scene.nodes.iter().find(|n| n.name == "Door").unwrap();
         assert!(matches!(
             &door.behaviors[0].behavior,

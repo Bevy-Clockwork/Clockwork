@@ -623,6 +623,7 @@ fn run_step(step: usize, s: &Step, rom: &[u8], made: &mut Made) -> Result<(), Re
                 name,
                 group,
                 door,
+                animation,
                 code,
                 extent,
                 into,
@@ -693,6 +694,7 @@ fn run_step(step: usize, s: &Step, rom: &[u8], made: &mut Made) -> Result<(), Re
                                     })
                                 })
                                 .transpose()?,
+                            animation: animation.as_deref().map(fill).transpose()?,
                             code: match code {
                                 Some(field) => {
                                     field.read(record).ok_or_else(|| short("code", index))?
@@ -2004,6 +2006,7 @@ mod tests {
                            x: (at: 2, size: U16), y: (at: 4, size: U16), origin: (100, 0),
                            item: Some((by: Some((at: 1)), outputs: { 5: "room" })),
                            name: (text: "enemy {} #{index}", fields: [(at: 1)]),
+                           animation: Some((text: "frame_{}", fields: [(at: 0)])),
                            group: Some((text: "Room")), code: Some((at: 1)), into: "enemies"),
                     Places(from: "records", stride: 6, count: Some(3),
                            when: [(field: (at: 0), values: [2])],
@@ -2034,6 +2037,7 @@ mod tests {
         assert_eq!(scene.nodes[0].item.as_deref(), Some("room"));
         assert_eq!(scene.nodes[1].item, None);
         assert_eq!(scene.nodes[0].group.as_deref(), Some("Room"));
+        assert_eq!(scene.nodes[0].animation.as_deref(), Some("frame_1"));
         // (24 + 100, 8) pixels at 16 per meter.
         assert_eq!(scene.nodes[0].position, [7.75, 0.0, 0.5]);
         assert_eq!(

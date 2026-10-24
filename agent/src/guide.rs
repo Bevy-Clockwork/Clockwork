@@ -229,7 +229,10 @@ Places(from: "rom", at: 0x1234, stride: 16, until: Some((field: (at: 0), values:
     `{index}` the record number. `door: Some((to: (text: "arrive {} {}", fields: [...]),
     radius: 0.75))` makes walking into it take the player to the node of that name (place the
     arrival points with another Places step whose names match). `extent: Some((by: field,
-    sizes: {value: (half_w, half_h)}))` says how far it reaches.
+    sizes: {value: (half_w, half_h)}))` says how far it reaches. `animation: Some((text:
+    "frame_{}", fields: [(at: 3)]))` names the animation each placement plays: objects that
+    show one frame chosen by their record (give the sprite a one-keyframe animation per frame,
+    from a Literal of keyframe records) or that start in another state.
 MarkPlaces(from: "forest_enemies", width: 64, height: 40, cell_size: 16, origin: (2048, 1024), into: "cells")
     Marks the cells each placement covers with its `code` (a field of its record, or its
     number from 1): a grid for a Surfaces output, so the map shows where enemies, doors and

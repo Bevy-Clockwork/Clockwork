@@ -444,6 +444,11 @@ pub const STEPS: &[VariantInfo] = &[
                 "Where walking into it takes the player: (to, radius, fade)",
             ),
             d(
+                "animation",
+                Optional(&STRUCTURE),
+                "The animation each plays: (text, fields)",
+            ),
+            d(
                 "code",
                 Optional(&STRUCTURE),
                 "The field MarkPlaces writes; the record's number without it",

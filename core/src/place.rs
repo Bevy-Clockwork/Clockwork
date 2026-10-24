@@ -133,6 +133,8 @@ pub struct Placement {
     pub x: f32,
     pub y: f32,
     pub door: Option<Door>,
+    /// The animation its sprite or model plays (the first without it).
+    pub animation: Option<String>,
     /// What a MarkPlaces step writes into its cells.
     pub code: i64,
     /// Half width and height in pixels.
@@ -160,6 +162,7 @@ pub struct SceneNode {
     pub item: Option<String>,
     pub position: [f32; 3],
     pub door: Option<Door>,
+    pub animation: Option<String>,
 }
 
 impl SceneTemplate {
@@ -178,6 +181,7 @@ impl SceneTemplate {
                     item: p.item.clone(),
                     position: [p.x * scale, 0.0, p.y * scale],
                     door: p.door.clone(),
+                    animation: p.animation.clone(),
                 })
                 .collect(),
         }
@@ -258,6 +262,7 @@ mod tests {
             x,
             y,
             door: None,
+            animation: None,
             code,
             half,
         };
