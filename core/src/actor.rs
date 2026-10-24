@@ -20,6 +20,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    action::Projectile,
     behavior::{Condition, Effect},
     character2d::{Direction4, Directional},
 };
@@ -77,9 +78,40 @@ pub struct ActorState {
     /// What happens on entering the state: a sound, a dialog, a flag (any trigger effect).
     #[serde(default)]
     pub enter: Option<Effect>,
+    /// A projectile it fires in this state (an octorok's rock, an archer's arrow).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shoot: Option<Shot>,
     /// Where it goes next: the first transition whose cue holds wins, checked every step.
     #[serde(default)]
     pub next: Vec<Transition>,
+}
+
+/// A projectile an actor fires, once each time it is in the state `at` seconds. The projectile
+/// is written like a character's ([`crate::action::Projectile`]); its damage hurts the player
+/// and a burst hurts the player inside it. Its id names it across the scene.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Shot {
+    pub projectile: Projectile,
+    /// Seconds into the state.
+    #[serde(default)]
+    pub at: f32,
+    /// Which way it flies.
+    #[serde(default)]
+    pub aim: Aim,
+    /// Meters in front of the actor it starts.
+    #[serde(default)]
+    pub ahead: f32,
+}
+
+/// Which way an actor's shot flies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum Aim {
+    /// At where the player is when it fires.
+    #[default]
+    Player,
+    /// The way the actor faces.
+    Facing,
 }
 
 /// How an actor moves in a state. Positions are on the ground, in meters.
@@ -173,6 +205,7 @@ impl Actor {
             contact: None,
             invulnerable: false,
             enter: None,
+            shoot: None,
             next: next
                 .into_iter()
                 .map(|(to, when)| Transition {
@@ -234,8 +267,28 @@ impl Actor {
                     ));
                 }
             }
+            if let Some(shot) = &state.shoot {
+                let p = &shot.projectile;
+                if !(shot.at.is_finite() && shot.at >= 0.0) {
+                    problems.push(format!(
+                        "state \"{}\" shoots at {} s, not a time in the state",
+                        state.name, shot.at
+                    ));
+                }
+                if !(p.lifetime.is_finite() && p.lifetime > 0.0) {
+                    problems.push(format!(
+                        "state \"{}\" shoots \"{}\", which lasts no time",
+                        state.name, p.id
+                    ));
+                }
+            }
         }
         problems
+    }
+
+    /// The projectiles its states fire.
+    pub fn shots(&self) -> impl Iterator<Item = &Shot> {
+        self.states.iter().filter_map(|s| s.shoot.as_ref())
     }
 }
 

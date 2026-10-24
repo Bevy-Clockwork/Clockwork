@@ -50,6 +50,19 @@ pub fn check(index: &AssetIndex, plugin: Option<&str>) -> Vec<Problem> {
                 at: asset.at.clone(),
                 message,
             }));
+            // A shot's sprite is a Sprite output of the actor's plugin.
+            for look in actor.shots().filter_map(|s| s.projectile.sprite.as_ref()) {
+                let at = OutputRef::new(&asset.at.plugin, &look.sprite);
+                if !matches!(
+                    index.get(&at).and_then(|a| a.output),
+                    Some(Output::Sprite { .. })
+                ) {
+                    problems.push(Problem {
+                        at: asset.at.clone(),
+                        message: format!("its shot's sprite \"{}\" isn't a Sprite output", at),
+                    });
+                }
+            }
         }
         if let Some(Output::Behavior {
             behavior:

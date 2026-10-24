@@ -706,9 +706,13 @@ functions, timers, distance checks) into states and numbers rather than code.
   placed nodes follow the asset as it changes.
 - **Editor:** the Inspector edits an actor's numbers and its states as RON (parsed as typed);
   Play moves actor nodes and plays their state's animation.
+- **Shots:** a state's `shoot` fires a projectile (written like a character's) a moment into
+  the state, at the player or the way the actor faces. Shots fly with the same code as the
+  character's projectiles (walls, bursts, lifetimes), hurt the player they touch (a straight
+  one is used up), and are drawn with their sprite from the actor's plugin, or as a shape.
 
-Not yet: actors that throw projectiles or use actions, actors blocking each other, flying and
-jumping motions, and paths around walls (they walk straight and slide).
+Not yet: actors that use actions, actors blocking each other, flying and jumping motions, and
+paths around walls (they walk straight and slide).
 
 ### 7.10.2 Music (implemented)
 

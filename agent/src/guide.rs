@@ -472,6 +472,13 @@ Behavior(id: "octorok", behavior: Actor((
     wall or hole stopped it), `Chance(per_second)`, `When(condition)`, `Not`, `All`, `Any`.
     Actors without `health` can't be beaten; beaten actors count for `DestroyAll`. Transitions
     to states the actor doesn't have are reported when the plugin is saved.
+    A state can fire a projectile: `shoot: Some((at: 0.3, aim: Player, ahead: 0.5,
+    projectile: (id: "rock", motion: Straight(speed: 6.0), lifetime: 2.0, radius: 0.2,
+    damage: 1.0, sprite: Some((sprite: "rock", animation: (...))))))` leaves `at` seconds into
+    the state (once each time the state is entered), at where the player is (`aim: Player`) or
+    the way the actor faces (`Facing`), and hurts the player it touches; a burst hurts the
+    player inside it. Written like a character's projectiles; its sprite is one of the actor's
+    plugin's. Translate a game's spit, throw and fire code into a state that shoots.
 
 What happens over time rather than at once (a cutscene, a boss's entrance, an NPC walking up to
 talk, a door that opens a moment after a lever) is a script, started by the effect `Run`:

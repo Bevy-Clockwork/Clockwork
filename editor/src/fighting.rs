@@ -76,4 +76,21 @@ pub fn gizmo_system(session: Res<crate::play::PlaySession>, mut gizmos: Gizmos) 
         let position = Vec3::new(p.position.x, p.height + 0.3, p.position.y);
         gizmos.sphere(Isometry3d::from_translation(position), 0.25, color);
     }
+    // The actors' shots that have no sprite (or no plugin to take one from).
+    let entities = session.entities();
+    for p in entities.shots.iter() {
+        let Some((spec, plugin)) = entities.shot(&p.id) else {
+            continue;
+        };
+        if spec.sprite.is_some() && plugin.is_some() {
+            continue;
+        }
+        let [r, g, b] = spec.color;
+        let position = Vec3::new(p.position.x, p.height + 0.3, p.position.y);
+        gizmos.sphere(
+            Isometry3d::from_translation(position),
+            spec.radius.max(0.1),
+            Color::srgb(r, g, b),
+        );
+    }
 }

@@ -336,6 +336,7 @@ mod tests {
             contact: None,
             invulnerable: false,
             enter: None,
+            shoot: None,
             next: next
                 .into_iter()
                 .map(|(to, when)| Transition {

@@ -12,12 +12,21 @@
 use std::collections::{BTreeSet, HashSet};
 
 use bevy::math::{Vec2, Vec3};
+use clockwork_core::{
+    action::Projectile,
+    actor::{Aim, Shot},
+    character2d::Direction4,
+};
 
 use super::{
     NodeId,
     actors::{self, Mind},
 };
-use crate::{actions::Shape, controller::World};
+use crate::{
+    actions::Shape,
+    controller::World,
+    projectiles::{Event, Projectiles},
+};
 
 pub use clockwork_core::behavior::{Behavior, Condition, Effect, Facts, NodeBehavior};
 
@@ -156,6 +165,12 @@ pub struct Entities {
     pending: Vec<Touch>,
     /// Every placed node by name, with or without behaviors: what scripts can move.
     names: Vec<(NodeId, String)>,
+    /// Projectiles actors have fired (see [`Shot`]).
+    pub shots: Projectiles,
+    /// What each of them is, by id (the first actor's that names it).
+    shot_specs: Vec<Projectile>,
+    /// The plugin of the actor each id comes from, for its sprite.
+    shot_plugins: Vec<Option<String>>,
 }
 
 /// The facts conditions are judged by: the entities' flags and gone nodes, and what the player
@@ -190,12 +205,22 @@ impl Entities {
         let mut live = Vec::new();
         let mut nodes = Vec::new();
         let mut names = Vec::new();
+        let mut shot_specs: Vec<Projectile> = Vec::new();
+        let mut shot_plugins = Vec::new();
         for n in placed {
             names.push((n.id, n.name.clone()));
             if n.behaviors.is_empty() && n.appears.is_none() && n.acts.is_none() {
                 continue;
             }
             for b in &n.behaviors {
+                if let Behavior::Actor(actor) = &b.behavior {
+                    for shot in actor.states.iter().filter_map(|s| s.shoot.as_ref()) {
+                        if !shot_specs.iter().any(|p| p.id == shot.projectile.id) {
+                            shot_specs.push(shot.projectile.clone());
+                            shot_plugins.push(b.from.as_ref().map(|at| at.plugin.clone()));
+                        }
+                    }
+                }
                 let health = match &b.behavior {
                     Behavior::Target { health, .. } => *health,
                     Behavior::Actor(actor) => actor.health.unwrap_or(0.0),
@@ -236,7 +261,16 @@ impl Entities {
             memo: HashSet::new(),
             pending: Vec::new(),
             names,
+            shots: Projectiles::default(),
+            shot_specs,
+            shot_plugins,
         }
+    }
+
+    /// What the actors' projectile `id` is, and the plugin its sprite comes from.
+    pub fn shot(&self, id: &str) -> Option<(&Projectile, Option<&str>)> {
+        let i = self.shot_specs.iter().position(|p| p.id == id)?;
+        Some((&self.shot_specs[i], self.shot_plugins[i].as_deref()))
     }
 
     /// The placed node of this name (the first, if several share it).
@@ -380,7 +414,7 @@ impl Entities {
     pub fn act(
         &mut self,
         dt: f32,
-        player: Vec3,
+        (player, player_radius): (Vec3, f32),
         world: &impl World,
         carried: &dyn Fn(&str) -> u32,
     ) {
@@ -433,15 +467,61 @@ impl Entities {
             }
         }
         let mut moved: Vec<(NodeId, Vec3)> = Vec::new();
+        let mut fired: Vec<(Shot, Vec3, Vec2)> = Vec::new();
         for e in self.live.iter_mut().filter(|e| e.working()) {
             let (Behavior::Actor(actor), Some(mind)) = (&e.behavior, &mut e.mind) else {
                 continue;
             };
             mind.seen();
+            let before = mind.time;
             let at = mind.step(actor, e.at, player, world, dt);
+            // A state's shot leaves as its moment passes, once each time the state is entered.
+            if let Some(shot) = actor.states.get(mind.state).and_then(|s| s.shoot.as_ref())
+                && before <= shot.at
+                && mind.time > shot.at
+            {
+                let dir = match shot.aim {
+                    Aim::Player => Vec2::new(player.x - at.x, player.z - at.z),
+                    Aim::Facing => facing_dir(mind.facing),
+                };
+                fired.push((shot.clone(), at, dir.normalize_or(facing_dir(mind.facing))));
+            }
             if at != e.at {
                 e.at = at;
                 moved.push((e.node, at));
+            }
+        }
+        for (shot, at, dir) in fired {
+            let from = Vec2::new(at.x, at.z) + dir * shot.ahead;
+            self.shots.spawn(&shot.projectile, from, at.y, dir);
+        }
+        // Shots fly, and hurt the player they touch: a straight one once, a burst once.
+        let player_ground = Vec2::new(player.x, player.z);
+        let touches = |position: Vec2, radius: f32| {
+            position.distance(player_ground) <= radius + player_radius
+        };
+        for event in self.shots.update(&self.shot_specs, Vec3::ZERO, world, dt) {
+            match event {
+                Event::Hit {
+                    uid,
+                    position,
+                    radius,
+                    damage,
+                    ..
+                } if touches(position, radius) => {
+                    self.pending.push(Touch::Hazard { damage });
+                    self.shots.on_hit(&self.shot_specs, uid);
+                }
+                Event::Burst {
+                    position,
+                    radius,
+                    damage,
+                    first: true,
+                    ..
+                } if damage > 0.0 && touches(position, radius) => {
+                    self.pending.push(Touch::Hazard { damage });
+                }
+                _ => {}
             }
         }
         for (node, at) in moved {
@@ -552,6 +632,16 @@ impl Entities {
             .iter()
             .filter(|n| !n.present(self.act))
             .map(|n| n.id)
+    }
+}
+
+/// The way a facing points on the ground plane (x east, y south).
+fn facing_dir(facing: Direction4) -> Vec2 {
+    match facing {
+        Direction4::North => Vec2::NEG_Y,
+        Direction4::East => Vec2::X,
+        Direction4::South => Vec2::Y,
+        Direction4::West => Vec2::NEG_X,
     }
 }
 
