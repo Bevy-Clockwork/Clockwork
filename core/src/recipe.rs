@@ -215,7 +215,7 @@ pub enum Step {
         objects: String,
         #[serde(default)]
         layout: ObjectLayout,
-        frames: FrameTables,
+        frames: Box<FrameTables>,
         into: String,
     },
     /// Appends the frames and animations of sprite `from` to sprite `into`. Games draw one
@@ -447,13 +447,26 @@ impl ObjectLayout {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FrameTables {
-    /// Each frame's object list: its offset in the objects buffer, plus `list_base`. A list is
-    /// a count (`count_size`) followed by that many objects.
+    /// Each frame's object list: its offset in the objects buffer (times `list_unit`), plus
+    /// `list_base`. A list is a count (`count_size`) followed by that many objects.
     pub lists: Table,
     #[serde(default)]
     pub list_base: u32,
     #[serde(default)]
     pub count_size: FieldSize,
+    /// Bytes per unit of the `lists` values: the object size, for games whose frames name their
+    /// first object by number. Default 1 (the values are byte offsets).
+    #[serde(default = "one")]
+    pub list_unit: u32,
+    /// Each frame's object count, for games that keep it in the frame's record: a list is then
+    /// only its objects, with no count before them (`count_size` is not read).
+    #[serde(default)]
+    pub counts: Option<Table>,
+    /// Each frame's own palettes, for games that load a frame's palettes as they draw it: an
+    /// object with palette number p uses palette (first + p) of the buffer instead of slot p of
+    /// the step's bank.
+    #[serde(default)]
+    pub palettes: Option<FramePalettes>,
     /// Each frame's first tile in the tiles buffer, counted in tiles. Object tile numbers are
     /// relative to it, as games that stream a frame's tiles into video memory do. Without it
     /// every frame starts at tile 0.
@@ -465,6 +478,19 @@ pub struct FrameTables {
     pub first_tile: u32,
 }
 
+fn one() -> u32 {
+    1
+}
+
+/// A [`FrameTables`]' per-frame palettes: 16-color BGR555 palettes (32 bytes each) in `buffer`,
+/// and each frame's first one, counted in palettes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FramePalettes {
+    pub buffer: String,
+    pub first: Table,
+}
+
 /// Where a [`Step::KeyframeAnimation`]'s keyframes start.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AnimationAt {
@@ -473,6 +499,18 @@ pub enum AnimationAt {
     /// Through a table of little-endian u32 pointers in the same buffer: the `index`th pointer
     /// minus `base` (the address the buffer's start has in memory) is the offset.
     Pointer { table: u32, index: u32, base: u32 },
+    /// Through a directory of records (`stride` bytes each, at `table` in the same buffer), for
+    /// games that keep an animation's length apart from its keyframes: record `index` gives the
+    /// keyframe count and the first keyframe's number, keyframes being numbered from offset
+    /// `keys`. The count ends the list; the layout's `end` is not read.
+    Directory {
+        table: u32,
+        index: u32,
+        stride: u32,
+        count: Field,
+        first: Field,
+        keys: u32,
+    },
 }
 
 /// How keyframes are stored: records of `stride` bytes.
@@ -1090,17 +1128,38 @@ impl Step {
                         access: Read,
                     },
                 ];
-                if let Some(table) = &frames.tile_base {
-                    ports.push(Port {
-                        path: vec![
-                            Seg::Field("frames"),
-                            Seg::Field("tile_base"),
-                            Seg::Field("buffer"),
-                        ],
-                        name: &table.buffer,
-                        kind: Buffer,
-                        access: Read,
-                    });
+                for (field, table) in [("tile_base", &frames.tile_base), ("counts", &frames.counts)]
+                {
+                    if let Some(table) = table {
+                        ports.push(Port {
+                            path: vec![
+                                Seg::Field("frames"),
+                                Seg::Field(field),
+                                Seg::Field("buffer"),
+                            ],
+                            name: &table.buffer,
+                            kind: Buffer,
+                            access: Read,
+                        });
+                    }
+                }
+                if let Some(palettes) = &frames.palettes {
+                    for (path, name) in [
+                        (vec![Seg::Field("buffer")], &palettes.buffer),
+                        (
+                            vec![Seg::Field("first"), Seg::Field("buffer")],
+                            &palettes.first.buffer,
+                        ),
+                    ] {
+                        let mut full = vec![Seg::Field("frames"), Seg::Field("palettes")];
+                        full.extend(path);
+                        ports.push(Port {
+                            path: full,
+                            name,
+                            kind: Buffer,
+                            access: Read,
+                        });
+                    }
                 }
                 ports.push(port("into", into, Sprite, Write));
                 ports

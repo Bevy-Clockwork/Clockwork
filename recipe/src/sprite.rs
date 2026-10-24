@@ -70,11 +70,32 @@ pub(crate) fn object_frames(
         .as_ref()
         .map(|t| table_values(step, buffers, t))
         .transpose()?;
-    if tile_bases.as_ref().is_some_and(|t| t.len() != lists.len()) {
-        return Err(decode(
-            step,
-            "the tile table and the list table need the same count".into(),
-        ));
+    let counts = frames
+        .counts
+        .as_ref()
+        .map(|t| table_values(step, buffers, t))
+        .transpose()?;
+    let palette_firsts = frames
+        .palettes
+        .as_ref()
+        .map(|p| {
+            Ok::<_, RecipeError>((
+                buffer(step, buffers, &p.buffer)?,
+                table_values(step, buffers, &p.first)?,
+            ))
+        })
+        .transpose()?;
+    for (what, len) in [
+        ("tile", tile_bases.as_ref().map(Vec::len)),
+        ("count", counts.as_ref().map(Vec::len)),
+        ("palette", palette_firsts.as_ref().map(|(_, t)| t.len())),
+    ] {
+        if len.is_some_and(|len| len != lists.len()) {
+            return Err(decode(
+                step,
+                format!("the {what} table and the list table need the same count"),
+            ));
+        }
     }
 
     let mut sprite = Sprite::default();
@@ -85,14 +106,21 @@ pub(crate) fn object_frames(
                 format!("frame {index}: {what} runs past the end of the objects buffer"),
             )
         };
-        let start = usize::try_from(*list + frames.list_base as i64)
+        let start = usize::try_from(*list * frames.list_unit as i64 + frames.list_base as i64)
             .map_err(|_| decode(step, format!("frame {index}: negative list offset")))?;
-        let count = clockwork_core::recipe::Field::new(0, frames.count_size)
-            .read(objects.get(start..).ok_or_else(|| at("the list"))?)
-            .ok_or_else(|| at("the object count"))?;
+        // A list starts with its count, unless a table gives the counts.
+        let (count, first_object) = match &counts {
+            Some(counts) => (counts[index].max(0), start),
+            None => (
+                clockwork_core::recipe::Field::new(0, frames.count_size)
+                    .read(objects.get(start..).ok_or_else(|| at("the list"))?)
+                    .ok_or_else(|| at("the object count"))?,
+                start + frames.count_size.bytes(),
+            ),
+        };
         let mut list_objects = Vec::new();
         for j in 0..count as usize {
-            let record = start + frames.count_size.bytes() + j * fields.stride as usize;
+            let record = first_object + j * fields.stride as usize;
             let record = objects.get(record..).ok_or_else(|| at("an object"))?;
             let read = |f: &clockwork_core::recipe::Field| f.read(record);
             let optional = |f: &Option<clockwork_core::recipe::Field>| {
@@ -127,7 +155,34 @@ pub(crate) fn object_frames(
         }
         let tile_base =
             tile_bases.as_ref().map_or(0, |t| t[index].max(0) as u32) + frames.first_tile;
-        let (image, origin) = compose(&list_objects, tiles, tile_base, palettes);
+        // The frame's own palettes go into the bank's slots from 0, as the game loads them.
+        let own_bank = match &palette_firsts {
+            Some((data, firsts)) => {
+                let from = usize::try_from(firsts[index])
+                    .ok()
+                    .map(|first| first * 32)
+                    .filter(|&from| from < data.len())
+                    .ok_or_else(|| {
+                        decode(
+                            step,
+                            format!(
+                                "frame {index}: palette {} is past the end of the palettes buffer",
+                                firsts[index]
+                            ),
+                        )
+                    })?;
+                let mut bank = palettes.clone();
+                bank.load(&data[from..data.len().min(from + 16 * 32)], 0);
+                Some(bank)
+            }
+            None => None,
+        };
+        let (image, origin) = compose(
+            &list_objects,
+            tiles,
+            tile_base,
+            own_bank.as_ref().unwrap_or(palettes),
+        );
         sprite.frames.push(SpriteFrame { image, origin });
     }
     Ok(sprite)
@@ -144,8 +199,26 @@ pub(crate) fn keyframe_animation(
     fps: f32,
 ) -> Result<SpriteAnimation, RecipeError> {
     let past_end = || decode(step, format!("animation \"{name}\" runs past the buffer"));
+    // A directory gives the keyframe count; the other positions end at the end flag.
+    let mut count = None;
     let start = match at {
         AnimationAt::Offset(offset) => *offset as usize,
+        AnimationAt::Directory {
+            table,
+            index,
+            stride,
+            count: count_field,
+            first,
+            keys,
+        } => {
+            let entry = *table as usize + *index as usize * *stride as usize;
+            let record = data.get(entry..).ok_or_else(past_end)?;
+            let (Some(n), Some(first)) = (count_field.read(record), first.read(record)) else {
+                return Err(past_end());
+            };
+            count = Some(n.max(0) as usize);
+            *keys as usize + first.max(0) as usize * layout.stride as usize
+        }
         AnimationAt::Pointer { table, index, base } => {
             let entry = *table as usize + *index as usize * 4;
             let bytes = data.get(entry..entry + 4).ok_or_else(past_end)?;
@@ -160,6 +233,21 @@ pub(crate) fn keyframe_animation(
             })? as usize
         }
     };
+    match count {
+        Some(0) => {
+            return Err(decode(
+                step,
+                format!("animation \"{name}\" has no keyframes"),
+            ));
+        }
+        Some(n) if n > MAX_KEYFRAMES => {
+            return Err(decode(
+                step,
+                format!("animation \"{name}\" has {n} keyframes, more than {MAX_KEYFRAMES}"),
+            ));
+        }
+        _ => {}
+    }
     let mut steps = Vec::new();
     loop {
         if steps.len() >= MAX_KEYFRAMES {
@@ -171,11 +259,13 @@ pub(crate) fn keyframe_animation(
         let record = data
             .get(start + steps.len() * layout.stride as usize..)
             .ok_or_else(past_end)?;
-        let (Some(frame), Some(ticks), Some(end)) = (
-            layout.frame.read(record),
-            layout.ticks.read(record),
-            layout.end.read(record),
-        ) else {
+        let end = match count {
+            Some(n) => Some((steps.len() + 1 == n) as i64),
+            None => layout.end.read(record),
+        };
+        let (Some(frame), Some(ticks), Some(end)) =
+            (layout.frame.read(record), layout.ticks.read(record), end)
+        else {
             return Err(past_end());
         };
         let flag = |f: &Option<clockwork_core::recipe::Field>| {
@@ -337,6 +427,9 @@ mod tests {
             },
             list_base: 0,
             count_size: FieldSize::U8,
+            list_unit: 1,
+            counts: None,
+            palettes: None,
             tile_base: None,
             first_tile: 0,
         };
@@ -357,5 +450,106 @@ mod tests {
             (8, 8, [-2, -3])
         );
         assert_eq!(frame.image.get(0, 0), [255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn older_frame_tables_keep_their_meaning() {
+        let frames: FrameTables = ron::from_str(
+            r#"(lists: (buffer: "t", offset: 0, stride: 4, count: 1, field: (at: 0)))"#,
+        )
+        .unwrap();
+        assert_eq!(frames.list_unit, 1);
+        assert!(frames.counts.is_none() && frames.palettes.is_none());
+    }
+
+    #[test]
+    fn frames_can_name_their_count_first_object_and_palettes() {
+        use clockwork_core::recipe::{FramePalettes, ObjectLayout};
+        // Frame records of three u16s: object count, first object (by number), first palette.
+        // The one frame draws object 1 (8-byte objects, no counts in between) with the frame's
+        // palette 1 + the object's palette 0.
+        let mut buffers: Buffers = HashMap::new();
+        buffers.insert("tiles".into(), vec![0x11; 32]);
+        buffers.insert(
+            "objects".into(),
+            vec![
+                9, 9, 9, 9, 0, 0, 0, 0, /* object 1: y 3, x 2 */ 3, 0, 2, 0, 0, 0, 0, 0,
+            ],
+        );
+        buffers.insert("frames".into(), vec![1, 0, 1, 0, 1, 0]);
+        let mut palettes = vec![0u8; 64];
+        palettes[32 + 2..32 + 4].copy_from_slice(&0x03E0u16.to_le_bytes()); // palette 1: green
+        buffers.insert("palettes".into(), palettes);
+        let mut bank = PaletteBank::default();
+        bank.load(&[0, 0, 0x1F, 0], 0); // the bank's red, which the frame's palettes replace
+        let banks = HashMap::from([("obj".to_string(), bank)]);
+        let field = |at| Table {
+            buffer: "frames".into(),
+            offset: 0,
+            stride: 6,
+            count: 1,
+            field: Field::new(at, FieldSize::U16),
+        };
+        let frames = FrameTables {
+            lists: field(2),
+            list_base: 0,
+            count_size: FieldSize::U8,
+            list_unit: 8,
+            counts: Some(field(0)),
+            palettes: Some(FramePalettes {
+                buffer: "palettes".into(),
+                first: field(4),
+            }),
+            tile_base: None,
+            first_tile: 0,
+        };
+        let sprite = object_frames(
+            0,
+            &buffers,
+            &banks,
+            "tiles",
+            "obj",
+            "objects",
+            &ObjectLayout::Oam,
+            &frames,
+        )
+        .unwrap();
+        let frame = &sprite.frames[0];
+        assert_eq!(frame.origin, [-2, -3]);
+        assert_eq!(frame.image.get(0, 0), [0, 255, 0, 255]);
+    }
+
+    #[test]
+    fn directories_give_the_keyframe_count() {
+        // A directory record (count 2, first keyframe 1) at 0, keyframes from 4. No keyframe
+        // has its end flag set, and the first has it set: the count decides.
+        let data = [
+            2, 1, 0, 0, /* keyframes */ 7, 7, 0, 0x80, 0, 5, 0, 0x80, 1, 6, 0, 0, 9, 9, 0, 0,
+        ];
+        let a = keyframe_animation(
+            0,
+            &data,
+            &sprite(2),
+            "walk",
+            &AnimationAt::Directory {
+                table: 0,
+                index: 0,
+                stride: 4,
+                count: Field::new(0, FieldSize::U8),
+                first: Field::new(1, FieldSize::U8),
+                keys: 4,
+            },
+            &layout(AfterEnd::Restart),
+            60.0,
+        )
+        .unwrap();
+        assert_eq!(
+            a.steps
+                .iter()
+                .map(|s| (s.frame, s.ticks))
+                .collect::<Vec<_>>(),
+            [(0, 5), (1, 6)]
+        );
+        assert_eq!(a.loop_start, Some(0));
     }
 }
