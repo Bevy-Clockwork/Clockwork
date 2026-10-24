@@ -45,6 +45,28 @@ impl fmt::Display for OutputRef {
     }
 }
 
+/// One asset exactly: its name and its registered kind. Names are unique per kind, not per
+/// plugin (an ability and a sprite may both be `hero/sword`), so selections and previews keep
+/// the kind too.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AssetId {
+    pub at: OutputRef,
+    /// The registered kind's name, as in [`KINDS`] ("Character" for composed characters).
+    pub kind: &'static str,
+}
+
+impl AssetId {
+    pub fn new(at: OutputRef, kind: &'static str) -> Self {
+        Self { at, kind }
+    }
+}
+
+impl fmt::Display for AssetId {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{} {}", self.kind, self.at)
+    }
+}
+
 /// A setting written in place, or the name of the asset that holds it: `"builtin/top-down"`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]

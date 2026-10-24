@@ -5,7 +5,7 @@
 use bevy::prelude::{Local, ResMut};
 use bevy_egui::egui::{self, RichText};
 use clockwork_core::{
-    asset::{Layer, OutputRef, Slot},
+    asset::{AssetId, Layer, OutputRef, Slot},
     behavior::NodeBehavior,
 };
 use clockwork_recipe::assets::{Asset, AssetIndex};
@@ -32,16 +32,14 @@ pub fn asset_section(
     ui: &mut egui::Ui,
     state: &mut EditorState,
     browser: &mut Browser,
-    at: &OutputRef,
+    id: &AssetId,
 ) {
+    let at = &id.at;
     // Its name and kind, then its fields (which may write its plugin), then what it uses and
     // what uses it.
     let kind = {
         let index = AssetIndex::build(&state.workshop.plugins);
-        let Some(asset) = (match browser.selected_kind {
-            Some(kind) => index.get_kind(at, kind),
-            None => index.get(at),
-        }) else {
+        let Some(asset) = index.find(id) else {
             return;
         };
         ui.horizontal(|ui| {
@@ -191,10 +189,9 @@ fn uses_tree(
 pub fn select(state: &mut EditorState, browser: &mut Browser, at: OutputRef) {
     state.workshop.selected = state.workshop.plugin_index(&at.plugin);
     state.workshop.selected_node = None;
-    browser.selected_kind = AssetIndex::build(&state.workshop.plugins)
+    browser.selected = AssetIndex::build(&state.workshop.plugins)
         .get(&at)
-        .map(|a| a.kind);
-    browser.selected = Some((at.plugin, at.output));
+        .map(|a| a.id());
 }
 
 /// A node's or the game's setting that names one asset of a kind.

@@ -2,7 +2,7 @@
 //! Built from the plugins' recipes and compositions alone: no ROM is read.
 
 use clockwork_core::{
-    asset::{self, AssetSource, BUILTIN, OutputRef, Use},
+    asset::{self, AssetId, AssetSource, BUILTIN, OutputRef, Use},
     recipe::{Kind, Output, Recipe},
 };
 
@@ -20,6 +20,12 @@ pub struct Asset<'a> {
     /// The output itself; `None` for a composition's characters, which are made, not written.
     pub output: Option<&'a Output>,
     pub uses: Vec<Use>,
+}
+
+impl Asset<'_> {
+    pub fn id(&self) -> AssetId {
+        AssetId::new(self.at.clone(), self.kind)
+    }
 }
 
 /// The assets of a set of plugins.
@@ -73,6 +79,11 @@ impl<'a> AssetIndex<'a> {
     /// The asset of that name and kind.
     pub fn get_kind(&self, at: &OutputRef, kind: &str) -> Option<&Asset<'a>> {
         self.assets.iter().find(|a| a.at == *at && a.kind == kind)
+    }
+
+    /// The asset with that id.
+    pub fn find(&self, id: &AssetId) -> Option<&Asset<'a>> {
+        self.get_kind(&id.at, id.kind)
     }
 
     /// The assets that use `at`, with the slot they use it in.
@@ -246,5 +257,12 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(found.value.pitch, 45.0);
+        // An id names one of them exactly.
+        let at = OutputRef::new("hero", "view");
+        for kind in ["Ability", "Camera"] {
+            let id = asset::AssetId::new(at.clone(), kind);
+            assert_eq!(index.find(&id).map(|a| a.id()), Some(id));
+        }
+        assert!(index.find(&asset::AssetId::new(at, "Sprite")).is_none());
     }
 }
